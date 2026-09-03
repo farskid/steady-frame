@@ -1,9 +1,10 @@
-/** Downscaled grayscale template match so a locked patch can be followed in 2D. */
+/** Full-resolution patch match around the lock point. */
 
-const WORK_W = 160
-const PATCH = 18
-const SEARCH = 26
+const PATCH = 36
+const SEARCH = 40
 const STEP = 2
+const MAX_JUMP = 36
+const MISS_LIMIT = 12
 
 export type TrackResult = {
   foundX: number
@@ -19,69 +20,74 @@ export class SubjectTracker {
   foundY = 0
   score = 1
 
+  private readonly patch = document.createElement('canvas')
+  private readonly patchCtx: CanvasRenderingContext2D
   private readonly work = document.createElement('canvas')
   private readonly workCtx: CanvasRenderingContext2D
   private template: Uint8Array | null = null
-  private baseline = 0
-  private lastWorkX = 0
-  private lastWorkY = 0
+  private baseline = 1
+  private misses = 0
 
   constructor() {
-    const ctx = this.work.getContext('2d', { willReadFrequently: true })
-    if (!ctx) throw new Error('2D canvas unavailable')
-    this.workCtx = ctx
+    this.patch.width = PATCH
+    this.patch.height = PATCH
+    const pctx = this.patch.getContext('2d', { willReadFrequently: true })
+    const wctx = this.work.getContext('2d', { willReadFrequently: true })
+    if (!pctx || !wctx) throw new Error('2D canvas unavailable')
+    this.patchCtx = pctx
+    this.workCtx = wctx
+    this.work.width = PATCH + SEARCH * 2
+    this.work.height = PATCH + SEARCH * 2
   }
 
   lock(source: CanvasImageSource, srcW: number, srcH: number, x: number, y: number): boolean {
-    this.prepareWork(srcW, srcH)
-    this.workCtx.drawImage(source, 0, 0, this.work.width, this.work.height)
-    const gray = readGray(this.workCtx, this.work.width, this.work.height)
-    const sx = this.work.width / srcW
-    const sy = this.work.height / srcH
-    const wx = clampInt(Math.round(x * sx), PATCH, this.work.width - PATCH - 1)
-    const wy = clampInt(Math.round(y * sy), PATCH, this.work.height - PATCH - 1)
-    this.template = extractPatch(gray, this.work.width, wx, wy, PATCH)
-    this.baseline = sad(gray, this.work.width, wx, wy, this.template, PATCH)
-    this.lastWorkX = wx
-    this.lastWorkY = wy
-    this.foundX = x
-    this.foundY = y
+    this.foundX = clamp(x, PATCH, srcW - PATCH)
+    this.foundY = clamp(y, PATCH, srcH - PATCH)
+    blitPatch(this.patchCtx, source, this.foundX, this.foundY, PATCH)
+    this.template = readGray(this.patchCtx, PATCH, PATCH)
+    this.baseline = Math.max(1, variance(this.template))
     this.locked = true
     this.lost = false
+    this.misses = 0
     this.score = 1
-    return true
+    return this.baseline > 18
   }
 
   unlock(): void {
     this.locked = false
     this.lost = false
     this.template = null
+    this.misses = 0
   }
 
   update(source: CanvasImageSource, srcW: number, srcH: number): TrackResult {
     if (!this.locked || !this.template) {
       return { foundX: srcW / 2, foundY: srcH / 2, score: 0, lost: true }
     }
-    this.prepareWork(srcW, srcH)
-    this.workCtx.drawImage(source, 0, 0, this.work.width, this.work.height)
-    const gray = readGray(this.workCtx, this.work.width, this.work.height)
-    const { x, y, cost } = search(
-      gray,
-      this.work.width,
-      this.work.height,
-      this.template,
-      this.lastWorkX,
-      this.lastWorkY,
-    )
-    this.lastWorkX = x
-    this.lastWorkY = y
-    const sx = srcW / this.work.width
-    const sy = srcH / this.work.height
-    this.foundX = x * sx
-    this.foundY = y * sy
-    const denom = Math.max(1, this.baseline)
-    this.score = clamp01(1 - (cost - this.baseline) / (denom * 3))
-    this.lost = cost > this.baseline * 2.4 + PATCH * PATCH * 8
+
+    const win = PATCH + SEARCH * 2
+    blitPatch(this.workCtx, source, this.foundX, this.foundY, win)
+    const gray = readGray(this.workCtx, win, win)
+    const { x, y, cost } = search(gray, win, this.template)
+    const origin = win / 2
+    const rawX = this.foundX + (x - origin)
+    const rawY = this.foundY + (y - origin)
+    const n = PATCH * PATCH
+    const meanAbs = cost / n
+    const good =
+      meanAbs < 38 &&
+      Math.hypot(rawX - this.foundX, rawY - this.foundY) <= MAX_JUMP
+
+    if (good) {
+      this.foundX = clamp(rawX, PATCH, srcW - PATCH)
+      this.foundY = clamp(rawY, PATCH, srcH - PATCH)
+      this.misses = Math.max(0, this.misses - 2)
+      this.score = clamp01(1 - meanAbs / 38)
+    } else {
+      this.misses += 1
+      this.score = clamp01(1 - meanAbs / 50)
+    }
+    this.lost = this.misses >= MISS_LIMIT
     return {
       foundX: this.foundX,
       foundY: this.foundY,
@@ -89,39 +95,22 @@ export class SubjectTracker {
       lost: this.lost,
     }
   }
-
-  private prepareWork(srcW: number, srcH: number): void {
-    const h = Math.max(90, Math.round((WORK_W * srcH) / srcW))
-    if (this.work.width !== WORK_W || this.work.height !== h) {
-      this.work.width = WORK_W
-      this.work.height = h
-    }
-  }
 }
 
 function search(
   gray: Uint8Array,
   gw: number,
-  gh: number,
   templ: Uint8Array,
-  cx: number,
-  cy: number,
 ): { x: number; y: number; cost: number } {
-  const minX = PATCH
-  const maxX = gw - PATCH - 1
-  const minY = PATCH
-  const maxY = gh - PATCH - 1
-  const x0 = clampInt(cx - SEARCH, minX, maxX)
-  const x1 = clampInt(cx + SEARCH, minX, maxX)
-  const y0 = clampInt(cy - SEARCH, minY, maxY)
-  const y1 = clampInt(cy + SEARCH, minY, maxY)
-
+  const min = Math.floor(PATCH / 2)
+  const max = gw - min - 1
   let best = Infinity
-  let bx = cx
-  let by = cy
-  for (let y = y0; y <= y1; y += STEP) {
-    for (let x = x0; x <= x1; x += STEP) {
-      const cost = sad(gray, gw, x, y, templ, PATCH)
+  const origin = Math.floor(gw / 2)
+  let bx = origin
+  let by = origin
+  for (let y = min; y <= max; y += STEP) {
+    for (let x = min; x <= max; x += STEP) {
+      const cost = sad(gray, gw, x, y, templ)
       if (cost < best) {
         best = cost
         bx = x
@@ -131,8 +120,8 @@ function search(
   }
   for (let y = by - 1; y <= by + 1; y++) {
     for (let x = bx - 1; x <= bx + 1; x++) {
-      if (x < minX || x > maxX || y < minY || y > maxY) continue
-      const cost = sad(gray, gw, x, y, templ, PATCH)
+      if (x < min || x > max || y < min || y > max) continue
+      const cost = sad(gray, gw, x, y, templ)
       if (cost < best) {
         best = cost
         bx = x
@@ -143,39 +132,40 @@ function search(
   return { x: bx, y: by, cost: best }
 }
 
-function extractPatch(
-  gray: Uint8Array,
-  gw: number,
-  cx: number,
-  cy: number,
-  size: number,
-): Uint8Array {
-  const out = new Uint8Array(size * size)
-  const half = Math.floor(size / 2)
-  let i = 0
-  for (let y = cy - half; y < cy - half + size; y++) {
-    const row = y * gw + (cx - half)
-    for (let x = 0; x < size; x++) out[i++] = gray[row + x] ?? 0
-  }
-  return out
-}
-
 function sad(
   gray: Uint8Array,
   gw: number,
   cx: number,
   cy: number,
   templ: Uint8Array,
-  size: number,
 ): number {
-  const half = Math.floor(size / 2)
+  const half = Math.floor(PATCH / 2)
   let s = 0
   let t = 0
-  for (let y = cy - half; y < cy - half + size; y++) {
+  for (let y = cy - half; y < cy - half + PATCH; y++) {
     let i = y * gw + (cx - half)
-    for (let x = 0; x < size; x++) s += Math.abs(gray[i++] - templ[t++])
+    for (let x = 0; x < PATCH; x++) s += Math.abs(gray[i++] - templ[t++])
   }
   return s
+}
+
+function blitPatch(
+  ctx: CanvasRenderingContext2D,
+  source: CanvasImageSource,
+  cx: number,
+  cy: number,
+  size: number,
+): void {
+  if (ctx.canvas.width !== size || ctx.canvas.height !== size) {
+    ctx.canvas.width = size
+    ctx.canvas.height = size
+  }
+  ctx.setTransform(1, 0, 0, 1, 0, 0)
+  ctx.fillStyle = '#000'
+  ctx.fillRect(0, 0, size, size)
+  const sx = Math.round(cx - size / 2)
+  const sy = Math.round(cy - size / 2)
+  ctx.drawImage(source, sx, sy, size, size, 0, 0, size, size)
 }
 
 function readGray(ctx: CanvasRenderingContext2D, w: number, h: number): Uint8Array {
@@ -187,8 +177,20 @@ function readGray(ctx: CanvasRenderingContext2D, w: number, h: number): Uint8Arr
   return gray
 }
 
-function clampInt(v: number, lo: number, hi: number): number {
-  return Math.min(hi, Math.max(lo, v | 0))
+function variance(gray: Uint8Array): number {
+  let sum = 0
+  for (let i = 0; i < gray.length; i++) sum += gray[i]
+  const mean = sum / gray.length
+  let v = 0
+  for (let i = 0; i < gray.length; i++) {
+    const d = gray[i] - mean
+    v += d * d
+  }
+  return v / gray.length
+}
+
+function clamp(v: number, lo: number, hi: number): number {
+  return Math.min(hi, Math.max(lo, v))
 }
 
 function clamp01(v: number): number {

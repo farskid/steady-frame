@@ -221,6 +221,7 @@ function refreshChrome(): void {
 }
 
 function lockSubject(): void {
+  resize()
   paintSource(performance.now() / 1000)
   motion.reset()
   motion.mode = 'lock'

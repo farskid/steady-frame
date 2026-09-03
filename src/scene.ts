@@ -58,32 +58,33 @@ export function drawTestScene(
   }
   ctx.stroke()
 
-  // Calibration target — lock the reticle on this, then move camera or subject.
-  const pulse = 1 + Math.sin(time * 2) * 0.04
+  // High-contrast lock target — distinct from the HUD reticle.
   ctx.translate(cx + subject.x, cy + subject.y)
-  ctx.scale(pulse, pulse)
-  ctx.strokeStyle = '#7ee0c8'
-  ctx.lineWidth = 3
+  ctx.fillStyle = '#f4f7fb'
   ctx.beginPath()
-  ctx.arc(0, 0, 54, 0, Math.PI * 2)
-  ctx.stroke()
+  ctx.arc(0, 0, 48, 0, Math.PI * 2)
+  ctx.fill()
+  ctx.fillStyle = '#e85d4c'
+  ctx.beginPath()
+  ctx.arc(0, 0, 34, 0, Math.PI * 2)
+  ctx.fill()
+  ctx.fillStyle = '#f4f7fb'
   ctx.beginPath()
   ctx.arc(0, 0, 18, 0, Math.PI * 2)
-  ctx.stroke()
+  ctx.fill()
+  ctx.fillStyle = '#14161c'
   ctx.beginPath()
-  ctx.moveTo(-70, 0)
-  ctx.lineTo(-24, 0)
-  ctx.moveTo(24, 0)
-  ctx.lineTo(70, 0)
-  ctx.moveTo(0, -70)
-  ctx.lineTo(0, -24)
-  ctx.moveTo(0, 24)
-  ctx.lineTo(0, 70)
+  ctx.arc(0, 0, 7, 0, Math.PI * 2)
+  ctx.fill()
+  ctx.strokeStyle = `rgba(244, 247, 251, ${0.4 + Math.sin(time * 3) * 0.2})`
+  ctx.lineWidth = 2
+  ctx.beginPath()
+  ctx.arc(0, 0, 56, 0, Math.PI * 2)
   ctx.stroke()
   ctx.fillStyle = '#f4f7fb'
-  ctx.font = '600 13px ui-sans-serif, system-ui, sans-serif'
+  ctx.font = '700 13px ui-sans-serif, system-ui, sans-serif'
   ctx.textAlign = 'center'
-  ctx.fillText('SUBJECT', 0, 92)
+  ctx.fillText('SUBJECT', 0, 68)
 
   ctx.restore()
 }
