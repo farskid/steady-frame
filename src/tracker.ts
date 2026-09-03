@@ -1,9 +1,9 @@
 /** Full-resolution patch match around the lock point. */
 
 const PATCH = 36
-const SEARCH = 40
+const SEARCH = 48
 const STEP = 2
-const MAX_JUMP = 36
+const MAX_JUMP = 44
 const MISS_LIMIT = 12
 
 export type TrackResult = {

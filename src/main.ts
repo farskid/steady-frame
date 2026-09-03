@@ -82,7 +82,8 @@ const sourceCtx = source.getContext('2d')!
 let running = false
 let locked = false
 let demoShakeUntil = 0
-let subjectMoveUntil = 0
+let subjectMoveStart = 0
+let subjectMoveEnd = 0
 let pointerActive = false
 let pointerGyro = { x: 0, y: 0, z: 0 }
 let lastFrame = performance.now() / 1000
@@ -109,10 +110,23 @@ function setStep(step: 1 | 2 | 3): void {
 }
 
 function subjectOffset(now: number): { x: number; y: number } {
-  if (now * 1000 > subjectMoveUntil) return { x: 0, y: 0 }
+  if (subjectMoveStart <= 0) return { x: 0, y: 0 }
+  const t = now - subjectMoveStart
+  const hold = Math.max(0.01, subjectMoveEnd - subjectMoveStart)
+  const fade = 0.5
+  let env = 1
+  if (t > hold) {
+    const u = (t - hold) / fade
+    if (u >= 1) {
+      subjectMoveStart = 0
+      return { x: 0, y: 0 }
+    }
+    env = 1 - u * u
+  }
+  // Starts at 0,0 so the tracker can follow instead of teleporting.
   return {
-    x: Math.sin(now * 1.7) * source.width * 0.16,
-    y: Math.cos(now * 1.1) * source.height * 0.1,
+    x: Math.sin(t * 1.35) * source.width * 0.13 * env,
+    y: (1 - Math.cos(t * 1.05)) * source.height * 0.055 * env,
   }
 }
 
@@ -245,7 +259,8 @@ function unlockSubject(): void {
   motion.mode = 'shake'
   pointerGyro = { x: 0, y: 0, z: 0 }
   demoShakeUntil = 0
-  subjectMoveUntil = 0
+  subjectMoveStart = 0
+  subjectMoveEnd = 0
   refreshChrome()
 }
 
@@ -340,7 +355,9 @@ shakeBtn.addEventListener('click', () => {
 })
 
 nudgeBtn.addEventListener('click', () => {
-  subjectMoveUntil = performance.now() + 3200
+  const now = performance.now() / 1000
+  subjectMoveStart = now
+  subjectMoveEnd = now + 3.2
 })
 
 stage.addEventListener('pointerdown', (event) => {
