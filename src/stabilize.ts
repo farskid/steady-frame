@@ -30,8 +30,9 @@ export function imageShiftFromImu(
 }
 
 /**
- * Hard pin: map the tracked subject onto the reticle.
- * scale keeps apparent size (face moving toward/away from the lens).
+ * Hard pin: the tracked point is always mapped to the reticle.
+ * Zoom grows with travel so we don't "let them escape" by clamping.
+ * Black edges mean the subject is near the lens FOV limit — not unlock.
  */
 export function lockViewMatrix(
   width: number,
@@ -43,19 +44,24 @@ export function lockViewMatrix(
 ): { matrix: Mat3; clamped: boolean } {
   const cx = width / 2
   const cy = height / 2
-  const zoom = CROP_ZOOM * clamp(scale, 0.72, 1.85)
-  const maxX = ((zoom - 1) / 2) * width * 0.98
-  const maxY = ((zoom - 1) / 2) * height * 0.98
-  const wantX = cx - foundX
-  const wantY = cy - foundY
-  const dx = clamp(wantX, -maxX, maxX)
-  const dy = clamp(wantY, -maxY, maxY)
-  const clamped = Math.abs(wantX) > maxX || Math.abs(wantY) > maxY
+  const distX = Math.abs(cx - foundX)
+  const distY = Math.abs(cy - foundY)
+  const need = Math.max(
+    CROP_ZOOM,
+    distX > 1 ? 1.1 * (1 + (2 * distX) / width) : 1,
+    distY > 1 ? 1.1 * (1 + (2 * distY) / height) : 1,
+  )
+  const zoom = clamp(need * clamp(scale, 0.7, 1.9), CROP_ZOOM, 6)
+  const atEdge =
+    foundX < width * 0.04 ||
+    foundX > width * 0.96 ||
+    foundY < height * 0.04 ||
+    foundY > height * 0.96
   const matrix = Mat3.translation(cx, cy)
     .multiply(Mat3.scale(zoom))
     .multiply(Mat3.rotation(-yaw))
-    .multiply(Mat3.translation(-(cx - dx), -(cy - dy)))
-  return { matrix, clamped }
+    .multiply(Mat3.translation(-foundX, -foundY))
+  return { matrix, clamped: atEdge }
 }
 
 /** Forward camera pose for the test-scene “camera shake”. */

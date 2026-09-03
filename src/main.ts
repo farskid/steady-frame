@@ -2,7 +2,7 @@ import './style.css'
 import { CameraFeed, drawCover } from './camera.ts'
 import { MotionTracker } from './motion.ts'
 import { drawTestScene } from './scene.ts'
-import { cropOnly, imageShiftFromImu, lockViewMatrix, sceneCameraMatrix } from './stabilize.ts'
+import { cropOnly, lockViewMatrix, sceneCameraMatrix } from './stabilize.ts'
 import { SubjectTracker } from './tracker.ts'
 
 const app = document.querySelector<HTMLDivElement>('#app')!
@@ -98,7 +98,7 @@ let lastTrack = {
   lost: false,
   clamped: false,
   visual: true,
-  via: 'patch' as 'face' | 'patch',
+  via: 'patch' as 'face' | 'patch' | 'color',
 }
 
 function resize(): void {
@@ -239,16 +239,16 @@ function refreshChrome(): void {
   }
   if (lastTrack.clamped) {
     coachEl.textContent =
-      'Crop limit. The pin used all of the 2.2× zoom. Stay more in-frame.'
+      'Pinned at the lens edge — black around the reticle is FOV, not a failed lock. Step back into frame.'
   } else if (lastTrack.lost) {
     coachEl.textContent =
-      'Texture lost — gyro still cancelling camera motion. Aim at a face or a contrasty target and lock again.'
+      'Lost the texture. Unlock and lock again on your face.'
   } else {
     coachEl.textContent =
-      'Pinned. Move your head or the phone. Live inset is unstabilized.'
+      'Pinned to the reticle. Move your head. You should not be able to walk off-center until you leave the camera.'
   }
-  const how = lastTrack.via === 'face' ? 'face' : 'patch'
-  statusEl.textContent = `${how} ${Math.round(lastTrack.score * 100)}% · ${motion.state.hasSensor ? 'IMU on' : 'no IMU'}`
+  const how = lastTrack.via
+  statusEl.textContent = `${how} ${Math.round(lastTrack.score * 100)}% · pin is unclamped`
 }
 
 function lockSubject(): void {
@@ -300,7 +300,6 @@ function frame(rawNow: number): void {
   let mat = cropOnly(width, height)
 
   if (locked) {
-    const shift = imageShiftFromImu(motion.state, width, height)
     const track = tracker.update(source, width, height)
     const sizeScale =
       track.via === 'face' && track.foundSize > 1
@@ -311,7 +310,7 @@ function frame(rawNow: number): void {
       height,
       track.foundX,
       track.foundY,
-      shift.yaw,
+      0,
       sizeScale,
     )
     mat = view.matrix
