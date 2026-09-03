@@ -199,14 +199,14 @@ export class MotionTracker {
     this.state.yaw += this.state.gyro.z * dt
 
     // High-pass leak: shake mode forgets quickly, lock mode holds pose.
-    const angleLeak = this.mode === 'shake' ? 6.5 : 0.18
+    const angleLeak = this.mode === 'shake' ? 6.5 : 0.03
     this.state.pitch = leakTowardZero(this.state.pitch, angleLeak, dt)
     this.state.roll = leakTowardZero(this.state.roll, angleLeak, dt)
     this.state.yaw = leakTowardZero(this.state.yaw, angleLeak, dt)
 
     // Double-integrate linear acceleration → velocity → position (meters).
-    const velDamp = this.mode === 'shake' ? 8 : 1.4
-    const posDamp = this.mode === 'shake' ? 7 : 1.1
+    const velDamp = this.mode === 'shake' ? 8 : 0.35
+    const posDamp = this.mode === 'shake' ? 7 : 0.25
     this.state.velocity.x += this.state.accel.x * dt
     this.state.velocity.y += this.state.accel.y * dt
     this.state.velocity.z += this.state.accel.z * dt

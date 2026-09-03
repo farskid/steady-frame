@@ -1,10 +1,13 @@
 /** Procedural “world” used when no camera is available. */
 
+export type SubjectOffset = { x: number; y: number }
+
 export function drawTestScene(
   ctx: CanvasRenderingContext2D,
   width: number,
   height: number,
   time: number,
+  subject: SubjectOffset = { x: 0, y: 0 },
 ): void {
   const cx = width / 2
   const cy = height / 2
@@ -55,9 +58,9 @@ export function drawTestScene(
   }
   ctx.stroke()
 
-  // Calibration target — the thing you would keep steady.
+  // Calibration target — lock the reticle on this, then move camera or subject.
   const pulse = 1 + Math.sin(time * 2) * 0.04
-  ctx.translate(cx, cy - 70)
+  ctx.translate(cx + subject.x, cy + subject.y)
   ctx.scale(pulse, pulse)
   ctx.strokeStyle = '#7ee0c8'
   ctx.lineWidth = 3

@@ -1,88 +1,55 @@
 import './style.css'
 import { CameraFeed, drawCover } from './camera.ts'
-import { Mat3 } from './mat3.ts'
-import { MotionTracker, type MotionMode } from './motion.ts'
+import { MotionTracker } from './motion.ts'
 import { drawTestScene } from './scene.ts'
-import { CROP_ZOOM, rawMatrix, viewMatrix } from './stabilize.ts'
+import { cropOnly, lockViewMatrix, sceneCameraMatrix } from './stabilize.ts'
+import { SubjectTracker } from './tracker.ts'
 
 const app = document.querySelector<HTMLDivElement>('#app')!
 
 app.innerHTML = `
-  <canvas id="stage" aria-label="Stabilized camera view"></canvas>
+  <canvas id="stage" aria-label="Camera view"></canvas>
   <div class="vignette"></div>
-  <div class="crosshair" aria-hidden="true"></div>
+  <div class="reticle" id="reticle" aria-hidden="true">
+    <span class="reticle-ring"></span>
+    <span class="reticle-label" id="reticle-label">Aim here</span>
+  </div>
 
   <header class="topbar">
-    <div>
-      <p class="eyebrow">Canvas EIS</p>
-      <h1>Steady Frame</h1>
-    </div>
+    <ol class="steps" id="steps">
+      <li class="on">1 Aim</li>
+      <li>2 Lock</li>
+      <li>3 Move</li>
+    </ol>
     <span id="source-pill" class="pill">Idle</span>
   </header>
 
   <aside class="pip" id="pip-wrap" hidden>
     <canvas id="pip" width="160" height="110"></canvas>
-    <span>Raw</span>
+    <span>Live — still shaking</span>
   </aside>
 
-  <section class="gate" id="gate">
-    <p class="eyebrow">Phone camera lock</p>
-    <h2>Cancel shake with the inverse motion matrix</h2>
-    <p>
-      This page reads your camera and IMU. Speed, acceleration, and direction
-      are integrated into a pose, inverted, and applied as a matrix transform
-      on the pixels — the same idea as electronic image stabilization.
-    </p>
+  <section class="panel" id="gate">
+    <p class="eyebrow">Subject lock</p>
+    <h1>Freeze the view on one subject</h1>
+    <ol class="howto">
+      <li>Turn on the camera and put the reticle on a subject.</li>
+      <li>Tap <strong>Lock subject</strong>.</li>
+      <li>Move the phone — or move the subject. The main view should hold still. The small Live inset keeps shaking so you can compare.</li>
+    </ol>
     <p class="hint">
-      On iPhone, Safari must grant Motion &amp; Orientation access. Nothing is
-      uploaded. On desktop, drag to simulate gyro or tap Demo shake.
+      Phone: allow camera + motion. Desktop: lock, then use Shake camera / Move subject.
     </p>
-    <button type="button" class="primary" id="start">Enable camera &amp; motion</button>
+    <button type="button" class="primary" id="start">Enable camera</button>
     <p class="error" id="gate-error" hidden></p>
   </section>
 
-  <section class="hud" id="hud" hidden>
-    <div class="metrics">
-      <div>
-        <span>Speed</span>
-        <strong id="m-speed">0.00 m/s</strong>
-      </div>
-      <div>
-        <span>Accel</span>
-        <strong id="m-accel">0.00 m/s²</strong>
-      </div>
-      <div>
-        <span>Direction</span>
-        <strong id="m-dir">—</strong>
-      </div>
-    </div>
-
-    <div class="vector-row">
-      <div class="compass">
-        <canvas id="needle" width="88" height="88"></canvas>
-        <span>XY velocity</span>
-      </div>
-      <pre class="matrix" id="matrix"></pre>
-    </div>
-
-    <div class="controls">
-      <label class="toggle">
-        <input type="checkbox" id="enabled" checked />
-        <span>Stabilization</span>
-      </label>
-      <label class="toggle">
-        <input type="checkbox" id="lock" />
-        <span>World lock</span>
-      </label>
-      <label class="strength">
-        <span>Strength</span>
-        <input type="range" id="strength" min="0" max="100" value="100" />
-      </label>
-    </div>
-
+  <section class="panel hud" id="hud" hidden>
+    <p class="coach" id="coach"></p>
     <div class="actions">
-      <button type="button" id="demo-shake">Demo shake</button>
-      <button type="button" id="reset">Zero pose</button>
+      <button type="button" class="primary" id="lock-btn">Lock subject</button>
+      <button type="button" id="shake-btn" hidden>Shake camera</button>
+      <button type="button" id="nudge-btn" hidden>Move subject</button>
     </div>
     <p class="status" id="status"></p>
   </section>
@@ -91,33 +58,36 @@ app.innerHTML = `
 const stage = app.querySelector<HTMLCanvasElement>('#stage')!
 const pip = app.querySelector<HTMLCanvasElement>('#pip')!
 const pipWrap = app.querySelector<HTMLElement>('#pip-wrap')!
-const needle = app.querySelector<HTMLCanvasElement>('#needle')!
 const gate = app.querySelector<HTMLElement>('#gate')!
 const hud = app.querySelector<HTMLElement>('#hud')!
 const gateError = app.querySelector<HTMLElement>('#gate-error')!
 const sourcePill = app.querySelector<HTMLElement>('#source-pill')!
 const statusEl = app.querySelector<HTMLElement>('#status')!
-const matrixEl = app.querySelector<HTMLElement>('#matrix')!
-const speedEl = app.querySelector<HTMLElement>('#m-speed')!
-const accelEl = app.querySelector<HTMLElement>('#m-accel')!
-const dirEl = app.querySelector<HTMLElement>('#m-dir')!
-
-const enabledInput = app.querySelector<HTMLInputElement>('#enabled')!
-const lockInput = app.querySelector<HTMLInputElement>('#lock')!
-const strengthInput = app.querySelector<HTMLInputElement>('#strength')!
+const coachEl = app.querySelector<HTMLElement>('#coach')!
+const reticle = app.querySelector<HTMLElement>('#reticle')!
+const reticleLabel = app.querySelector<HTMLElement>('#reticle-label')!
+const stepsEl = app.querySelector<HTMLElement>('#steps')!
+const lockBtn = app.querySelector<HTMLButtonElement>('#lock-btn')!
+const shakeBtn = app.querySelector<HTMLButtonElement>('#shake-btn')!
+const nudgeBtn = app.querySelector<HTMLButtonElement>('#nudge-btn')!
 
 const camera = new CameraFeed()
 const motion = new MotionTracker()
+const tracker = new SubjectTracker()
 const ctx = stage.getContext('2d')!
 const pipCtx = pip.getContext('2d')!
-const needleCtx = needle.getContext('2d')!
+const source = document.createElement('canvas')
+const sourceCtx = source.getContext('2d')!
 
 let running = false
+let locked = false
 let demoShakeUntil = 0
+let subjectMoveUntil = 0
 let pointerActive = false
 let pointerGyro = { x: 0, y: 0, z: 0 }
 let lastFrame = performance.now() / 1000
 let hudTick = 0
+let lastTrack = { foundX: 0, foundY: 0, score: 1, lost: false, clamped: false }
 
 function resize(): void {
   const dpr = Math.min(window.devicePixelRatio || 1, 2)
@@ -127,56 +97,34 @@ function resize(): void {
     stage.width = w
     stage.height = h
   }
-}
-
-function formatMatrix(m: Mat3): string {
-  const rows = m.rows()
-  const cell = (n: number) => n.toFixed(3).padStart(8)
-  return rows.map((row) => row.map(cell).join(' ')).join('\n')
-}
-
-function compassLabel(rad: number, speed: number): string {
-  if (speed < 0.02) return 'still'
-  const deg = ((rad * 180) / Math.PI + 360) % 360
-  const dirs = ['E', 'NE', 'N', 'NW', 'W', 'SW', 'S', 'SE']
-  const idx = Math.round(deg / 45) % 8
-  return `${dirs[idx]} ${deg.toFixed(0)}°`
-}
-
-function drawNeedle(): void {
-  const { velocity, accel } = motion.state
-  const w = needle.width
-  const h = needle.height
-  const cx = w / 2
-  const cy = h / 2
-  needleCtx.clearRect(0, 0, w, h)
-  needleCtx.strokeStyle = 'rgba(244,247,251,0.18)'
-  needleCtx.beginPath()
-  needleCtx.arc(cx, cy, 34, 0, Math.PI * 2)
-  needleCtx.stroke()
-
-  const drawVec = (x: number, y: number, color: string, scale: number) => {
-    const px = cx + x * scale
-    const py = cy - y * scale
-    needleCtx.strokeStyle = color
-    needleCtx.fillStyle = color
-    needleCtx.beginPath()
-    needleCtx.moveTo(cx, cy)
-    needleCtx.lineTo(px, py)
-    needleCtx.stroke()
-    needleCtx.beginPath()
-    needleCtx.arc(px, py, 3, 0, Math.PI * 2)
-    needleCtx.fill()
+  if (source.width !== w || source.height !== h) {
+    source.width = w
+    source.height = h
   }
-
-  drawVec(accel.x, accel.y, '#e8c872', 8)
-  drawVec(velocity.x, velocity.y, '#7ee0c8', 28)
 }
 
-function paintSource(width: number, height: number, time: number): void {
+function setStep(step: 1 | 2 | 3): void {
+  const items = [...stepsEl.querySelectorAll('li')]
+  items.forEach((el, i) => el.classList.toggle('on', i < step))
+}
+
+function subjectOffset(now: number): { x: number; y: number } {
+  if (now * 1000 > subjectMoveUntil) return { x: 0, y: 0 }
+  return {
+    x: Math.sin(now * 1.7) * source.width * 0.16,
+    y: Math.cos(now * 1.1) * source.height * 0.1,
+  }
+}
+
+function paintSource(time: number): void {
+  const width = source.width
+  const height = source.height
+  sourceCtx.setTransform(1, 0, 0, 1, 0, 0)
+  sourceCtx.fillStyle = '#07080c'
+  sourceCtx.fillRect(0, 0, width, height)
   if (camera.ready) {
     drawCover(
-      ctx,
+      sourceCtx,
       camera.video,
       camera.video.videoWidth,
       camera.video.videoHeight,
@@ -185,30 +133,21 @@ function paintSource(width: number, height: number, time: number): void {
     )
     return
   }
-  drawTestScene(ctx, width, height, time)
+  sceneCameraMatrix(motion.state, width, height).applyTo(sourceCtx)
+  drawTestScene(sourceCtx, width, height, time, subjectOffset(time))
+  sourceCtx.setTransform(1, 0, 0, 1, 0, 0)
 }
 
-function paintPip(time: number, source: 'camera' | 'scene'): void {
+function paintPip(): void {
   const w = pip.width
   const h = pip.height
   pipCtx.setTransform(1, 0, 0, 1, 0, 0)
   pipCtx.fillStyle = '#07080c'
   pipCtx.fillRect(0, 0, w, h)
-  if (source === 'camera' && camera.ready) {
-    drawCover(
-      pipCtx,
-      camera.video,
-      camera.video.videoWidth,
-      camera.video.videoHeight,
-      w,
-      h,
-    )
-    return
-  }
-  const pose = rawMatrix(motion.state, w, h, 'scene')
-  pose.applyTo(pipCtx)
-  drawTestScene(pipCtx, w, h, time)
-  pipCtx.setTransform(1, 0, 0, 1, 0, 0)
+  const scale = Math.max(w / source.width, h / source.height)
+  const dw = source.width * scale
+  const dh = source.height * scale
+  pipCtx.drawImage(source, (w - dw) / 2, (h - dh) / 2, dw, dh)
 }
 
 function applyDemoShake(dt: number, now: number): void {
@@ -220,16 +159,16 @@ function applyDemoShake(dt: number, now: number): void {
     z: Math.sin(t * 13) * 1.4,
   }
   const gyro = {
-    x: Math.sin(t * 18) * 1.1,
-    y: Math.cos(t * 21) * 1.3,
-    z: Math.sin(t * 9) * 0.45,
+    x: Math.sin(t * 18) * 0.9,
+    y: Math.cos(t * 21) * 1.05,
+    z: Math.sin(t * 9) * 0.35,
   }
   if (motion.state.hasSensor) motion.perturb(dt, accel, gyro)
   else motion.ingestSimulated(dt, accel, gyro)
 }
 
 function applyPointer(dt: number): void {
-  if (performance.now() < demoShakeUntil) return
+  if (!locked || performance.now() < demoShakeUntil) return
   pointerGyro.x *= Math.exp(-dt * 12)
   pointerGyro.y *= Math.exp(-dt * 12)
   pointerGyro.z *= Math.exp(-dt * 12)
@@ -244,52 +183,112 @@ function applyPointer(dt: number): void {
   )
 }
 
+function refreshChrome(): void {
+  reticle.classList.toggle('locked', locked)
+  reticle.classList.toggle('lost', locked && lastTrack.lost)
+  reticleLabel.textContent = !locked
+    ? 'Aim here'
+    : lastTrack.lost
+      ? 'Subject lost'
+      : 'Locked'
+  lockBtn.textContent = locked ? 'Unlock' : 'Lock subject'
+  lockBtn.classList.toggle('danger', locked)
+  shakeBtn.hidden = !locked
+  nudgeBtn.hidden = !locked || camera.ready
+  pipWrap.hidden = !locked
+  setStep(locked ? 3 : 2)
+
+  if (!locked) {
+    coachEl.textContent =
+      'Put the reticle on a subject, then tap Lock. After that, move the camera — the main view should freeze.'
+    statusEl.textContent = camera.ready
+      ? 'Live camera. Lock is visual + IMU: it pins whatever is under the reticle.'
+      : 'No camera here, so this is a test scene. Lock, then Shake camera or Move subject.'
+    return
+  }
+  if (lastTrack.lost) {
+    coachEl.textContent =
+      'Tracking lost. Unlock, aim again, and lock on a high-contrast subject.'
+  } else if (lastTrack.clamped) {
+    coachEl.textContent =
+      'At the crop limit. Move back toward the lock pose — big pans will hit the edge of the zoomed frame.'
+  } else {
+    coachEl.textContent =
+      'Locked. Move the phone, or Move subject. Main view holds; Live inset still shakes.'
+  }
+  const pct = Math.round(lastTrack.score * 100)
+  statusEl.textContent = `Tracking ${pct}% · inverse matrix on pixels`
+}
+
+function lockSubject(): void {
+  paintSource(performance.now() / 1000)
+  motion.reset()
+  motion.mode = 'lock'
+  pointerGyro = { x: 0, y: 0, z: 0 }
+  tracker.lock(source, source.width, source.height, source.width / 2, source.height / 2)
+  locked = true
+  lastTrack = {
+    foundX: source.width / 2,
+    foundY: source.height / 2,
+    score: 1,
+    lost: false,
+    clamped: false,
+  }
+  refreshChrome()
+}
+
+function unlockSubject(): void {
+  locked = false
+  tracker.unlock()
+  motion.reset()
+  motion.mode = 'shake'
+  pointerGyro = { x: 0, y: 0, z: 0 }
+  demoShakeUntil = 0
+  subjectMoveUntil = 0
+  refreshChrome()
+}
+
 function frame(rawNow: number): void {
   const now = rawNow / 1000
   const dt = Math.min(0.05, Math.max(0.001, now - lastFrame))
   lastFrame = now
   resize()
+  motion.mode = locked ? 'lock' : 'shake'
 
   applyDemoShake(dt, now)
   applyPointer(dt)
+  paintSource(now)
 
   const width = stage.width
   const height = stage.height
-  const enabled = enabledInput.checked
-  const strength = Number(strengthInput.value) / 100
-  motion.mode = (lockInput.checked ? 'lock' : 'shake') as MotionMode
+  let mat = cropOnly(width, height)
 
-  const source = camera.ready ? 'camera' : 'scene'
-  const mat = viewMatrix(
-    motion.state,
-    {
-      enabled,
-      strength,
+  if (locked) {
+    const track = tracker.update(source, width, height)
+    const view = lockViewMatrix(
       width,
       height,
-    },
-    source,
-  )
+      track.foundX,
+      track.foundY,
+      motion.state.yaw,
+    )
+    mat = view.matrix
+    lastTrack = { ...track, clamped: view.clamped }
+  }
 
   ctx.setTransform(1, 0, 0, 1, 0, 0)
   ctx.fillStyle = '#07080c'
   ctx.fillRect(0, 0, width, height)
   mat.applyTo(ctx)
-  paintSource(width, height, now)
+  ctx.drawImage(source, 0, 0, width, height)
   ctx.setTransform(1, 0, 0, 1, 0, 0)
 
-  paintPip(now, source)
+  if (locked) paintPip()
 
   hudTick += dt
-  if (hudTick >= 1 / 20) {
+  if (hudTick >= 1 / 12) {
     hudTick = 0
-    const { speed, accel, direction } = motion.state
-    const accMag = Math.hypot(accel.x, accel.y, accel.z)
-    speedEl.textContent = `${speed.toFixed(2)} m/s`
-    accelEl.textContent = `${accMag.toFixed(2)} m/s²`
-    dirEl.textContent = compassLabel(direction, speed)
-    matrixEl.textContent = formatMatrix(mat)
-    drawNeedle()
+    refreshChrome()
   }
 
   if (running) requestAnimationFrame(frame)
@@ -301,25 +300,19 @@ async function start(): Promise<void> {
   startBtn.disabled = true
   startBtn.textContent = 'Requesting…'
 
-  let motionOk = true
   try {
-    const [granted] = await Promise.all([
-      motion.requestPermission(),
-      camera.start(),
-    ])
-    motionOk = granted
+    await Promise.all([motion.requestPermission(), camera.start()])
   } catch {
-    motionOk = false
     if (camera.status === 'pending' || camera.status === 'idle') {
       await camera.start()
     }
   }
   motion.start()
+  motion.mode = 'shake'
 
   running = true
   gate.hidden = true
   hud.hidden = false
-  pipWrap.hidden = false
   requestAnimationFrame(frame)
 
   if (camera.status === 'live') {
@@ -329,29 +322,28 @@ async function start(): Promise<void> {
     sourcePill.textContent = 'Test scene'
     sourcePill.classList.add('fallback')
   }
-
-  const bits: string[] = []
-  if (camera.status !== 'live') bits.push(camera.error || 'No camera — test scene is active.')
-  if (!motionOk) bits.push('Motion permission denied. Drag on the image to simulate gyro.')
-  bits.push(`Crop zoom ${CROP_ZOOM.toFixed(2)}× keeps edges covered while the inverse matrix runs.`)
-  statusEl.textContent = bits.join(' ')
+  refreshChrome()
 }
 
 app.querySelector('#start')!.addEventListener('click', () => {
   void start()
 })
 
-app.querySelector('#demo-shake')!.addEventListener('click', () => {
-  demoShakeUntil = performance.now() + 2800
+lockBtn.addEventListener('click', () => {
+  if (locked) unlockSubject()
+  else lockSubject()
 })
 
-app.querySelector('#reset')!.addEventListener('click', () => {
-  motion.reset()
-  pointerGyro = { x: 0, y: 0, z: 0 }
+shakeBtn.addEventListener('click', () => {
+  demoShakeUntil = performance.now() + 3200
+})
+
+nudgeBtn.addEventListener('click', () => {
+  subjectMoveUntil = performance.now() + 3200
 })
 
 stage.addEventListener('pointerdown', (event) => {
-  if (gate.hidden === false) return
+  if (!locked) return
   pointerActive = true
   stage.setPointerCapture(event.pointerId)
 })
