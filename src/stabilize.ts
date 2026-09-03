@@ -1,8 +1,8 @@
 import { clamp, Mat3 } from './mat3.ts'
 import type { MotionState } from './motion.ts'
 
-/** Extra scale so inverse transforms do not reveal empty canvas at the edges. */
-export const CROP_ZOOM = 1.42
+/** Heavy crop so a moving subject can be panned back onto the reticle. */
+export const CROP_ZOOM = 2.2
 
 const HFOV = (65 * Math.PI) / 180
 
@@ -14,9 +14,24 @@ export function cropOnly(width: number, height: number): Mat3 {
     .multiply(Mat3.translation(-cx, -cy))
 }
 
+export function imageShiftFromImu(
+  motion: MotionState,
+  width: number,
+  _height: number,
+): { x: number; y: number; yaw: number } {
+  const focalPx = width / 2 / Math.tan(HFOV / 2)
+  const pitch = clamp(motion.pitch, -1.2, 1.2)
+  const roll = clamp(motion.roll, -1.2, 1.2)
+  return {
+    x: focalPx * Math.tan(roll) + motion.position.x * 220,
+    y: focalPx * Math.tan(pitch) - motion.position.y * 220,
+    yaw: motion.yaw,
+  }
+}
+
 /**
- * Keep the tracked subject at the screen center: rotate opposite yaw,
- * translate opposite the subject's pixel motion, then crop-zoom.
+ * Hard pin: map the tracked subject onto the reticle.
+ * scale keeps apparent size (face moving toward/away from the lens).
  */
 export function lockViewMatrix(
   width: number,
@@ -24,16 +39,20 @@ export function lockViewMatrix(
   foundX: number,
   foundY: number,
   yaw: number,
+  scale = 1,
 ): { matrix: Mat3; clamped: boolean } {
   const cx = width / 2
   const cy = height / 2
-  const maxX = ((CROP_ZOOM - 1) / 2) * width * 0.9
-  const maxY = ((CROP_ZOOM - 1) / 2) * height * 0.9
-  const dx = clamp(cx - foundX, -maxX, maxX)
-  const dy = clamp(cy - foundY, -maxY, maxY)
-  const clamped = Math.abs(cx - foundX) > maxX || Math.abs(cy - foundY) > maxY
+  const zoom = CROP_ZOOM * clamp(scale, 0.72, 1.85)
+  const maxX = ((zoom - 1) / 2) * width * 0.98
+  const maxY = ((zoom - 1) / 2) * height * 0.98
+  const wantX = cx - foundX
+  const wantY = cy - foundY
+  const dx = clamp(wantX, -maxX, maxX)
+  const dy = clamp(wantY, -maxY, maxY)
+  const clamped = Math.abs(wantX) > maxX || Math.abs(wantY) > maxY
   const matrix = Mat3.translation(cx, cy)
-    .multiply(Mat3.scale(CROP_ZOOM))
+    .multiply(Mat3.scale(zoom))
     .multiply(Mat3.rotation(-yaw))
     .multiply(Mat3.translation(-(cx - dx), -(cy - dy)))
   return { matrix, clamped }
@@ -45,16 +64,11 @@ export function sceneCameraMatrix(
   width: number,
   height: number,
 ): Mat3 {
-  const focalPx = width / 2 / Math.tan(HFOV / 2)
-  const yaw = motion.yaw
-  const pitch = clamp(motion.pitch, -1.15, 1.15)
-  const roll = clamp(motion.roll, -1.15, 1.15)
-  const tx = clamp(focalPx * Math.tan(roll) + motion.position.x * 220, -width * 0.35, width * 0.35)
-  const ty = clamp(focalPx * Math.tan(pitch) - motion.position.y * 220, -height * 0.35, height * 0.35)
+  const shift = imageShiftFromImu(motion, width, height)
   const cx = width / 2
   const cy = height / 2
   return Mat3.translation(cx, cy)
-    .multiply(Mat3.rotation(yaw))
-    .multiply(Mat3.translation(tx, ty))
+    .multiply(Mat3.rotation(shift.yaw))
+    .multiply(Mat3.translation(shift.x, shift.y))
     .multiply(Mat3.translation(-cx, -cy))
 }

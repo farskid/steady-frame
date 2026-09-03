@@ -18,6 +18,8 @@ export type MotionState = {
   sampleHz: number
 }
 
+type Orient = { alpha: number; beta: number; gamma: number }
+
 type DeviceMotionPermission = {
   requestPermission?: () => Promise<'granted' | 'denied'>
 }
@@ -54,15 +56,28 @@ export class MotionTracker {
   private sampleWindowT = 0
   private listening = false
   private simulated = false
+  private orientationLive = false
+  private lastOrient: Orient | null = null
+  private baseOrient: Orient | null = null
+  private gravity = vec()
 
   private readonly onMotion = (event: DeviceMotionEvent) => {
     const now = performance.now() / 1000
     const dt = this.stepDt(now, event.interval ? event.interval / 1000 : undefined)
     const accel = event.acceleration
+    const ag = event.accelerationIncludingGravity
     const rate = event.rotationRate
-    const ax = accel?.x
-    const ay = accel?.y
-    const az = accel?.z
+    let ax = accel?.x
+    let ay = accel?.y
+    let az = accel?.z
+    if (ax == null && ag?.x != null) {
+      this.gravity.x = this.gravity.x * 0.9 + ag.x * 0.1
+      this.gravity.y = this.gravity.y * 0.9 + (ag.y ?? 0) * 0.1
+      this.gravity.z = this.gravity.z * 0.9 + (ag.z ?? 0) * 0.1
+      ax = ag.x - this.gravity.x
+      ay = (ag.y ?? 0) - this.gravity.y
+      az = (ag.z ?? 0) - this.gravity.z
+    }
     const rb = rate?.beta
     const rg = rate?.gamma
     const ra = rate?.alpha
@@ -77,15 +92,32 @@ export class MotionTracker {
     this.state.hasSensor = true
     this.simulated = false
 
+    const skipAngles = this.orientationLive && this.mode === 'lock'
     this.integrate(
       dt,
       ax ?? 0,
       ay ?? 0,
       az ?? 0,
-      degToRad(rb ?? 0),
-      degToRad(rg ?? 0),
-      degToRad(ra ?? 0),
+      skipAngles ? 0 : degToRad(rb ?? 0),
+      skipAngles ? 0 : degToRad(rg ?? 0),
+      skipAngles ? 0 : degToRad(ra ?? 0),
     )
+  }
+
+  private readonly onOrientation = (event: DeviceOrientationEvent) => {
+    if (event.beta == null || event.gamma == null) return
+    this.lastOrient = {
+      alpha: event.alpha ?? 0,
+      beta: event.beta,
+      gamma: event.gamma,
+    }
+    this.state.hasSensor = true
+    this.orientationLive = true
+    this.simulated = false
+    if (!this.baseOrient || this.mode !== 'lock') return
+    this.state.pitch = degToRad(event.beta - this.baseOrient.beta)
+    this.state.roll = degToRad(event.gamma - this.baseOrient.gamma)
+    this.state.yaw = degToRad(deltaDeg(event.alpha ?? 0, this.baseOrient.alpha))
   }
 
   async requestPermission(): Promise<boolean> {
@@ -110,12 +142,14 @@ export class MotionTracker {
     this.listening = true
     this.lastT = performance.now() / 1000
     window.addEventListener('devicemotion', this.onMotion)
+    window.addEventListener('deviceorientation', this.onOrientation)
   }
 
   stop(): void {
     if (!this.listening) return
     this.listening = false
     window.removeEventListener('devicemotion', this.onMotion)
+    window.removeEventListener('deviceorientation', this.onOrientation)
   }
 
   reset(): void {
@@ -128,6 +162,7 @@ export class MotionTracker {
     this.state.yaw = 0
     this.state.speed = 0
     this.state.direction = 0
+    this.baseOrient = this.lastOrient ? { ...this.lastOrient } : null
   }
 
   /**
@@ -199,7 +234,7 @@ export class MotionTracker {
     this.state.yaw += this.state.gyro.z * dt
 
     // High-pass leak: shake mode forgets quickly, lock mode holds pose.
-    const angleLeak = this.mode === 'shake' ? 6.5 : 0.03
+    const angleLeak = this.mode === 'shake' ? 6.5 : this.orientationLive ? 0 : 0.02
     this.state.pitch = leakTowardZero(this.state.pitch, angleLeak, dt)
     this.state.roll = leakTowardZero(this.state.roll, angleLeak, dt)
     this.state.yaw = leakTowardZero(this.state.yaw, angleLeak, dt)
@@ -232,6 +267,13 @@ export class MotionTracker {
 
 function degToRad(deg: number): number {
   return (deg * Math.PI) / 180
+}
+
+function deltaDeg(now: number, base: number): number {
+  let d = now - base
+  while (d > 180) d -= 360
+  while (d < -180) d += 360
+  return d
 }
 
 function lerpExp(current: number, target: number, alpha: number): number {

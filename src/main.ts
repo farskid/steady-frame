@@ -2,7 +2,7 @@ import './style.css'
 import { CameraFeed, drawCover } from './camera.ts'
 import { MotionTracker } from './motion.ts'
 import { drawTestScene } from './scene.ts'
-import { cropOnly, lockViewMatrix, sceneCameraMatrix } from './stabilize.ts'
+import { cropOnly, imageShiftFromImu, lockViewMatrix, sceneCameraMatrix } from './stabilize.ts'
 import { SubjectTracker } from './tracker.ts'
 
 const app = document.querySelector<HTMLDivElement>('#app')!
@@ -30,15 +30,15 @@ app.innerHTML = `
   </aside>
 
   <section class="panel" id="gate">
-    <p class="eyebrow">Subject lock</p>
-    <h1>Freeze the view on one subject</h1>
+    <p class="eyebrow">Subject pin</p>
+    <h1>Hard-lock a subject like extreme IS</h1>
     <ol class="howto">
-      <li>Turn on the camera and put the reticle on a subject.</li>
-      <li>Tap <strong>Lock subject</strong>.</li>
-      <li>Move the phone — or move the subject. The main view should hold still. The small Live inset keeps shaking so you can compare.</li>
+      <li>Canon IS II cancels <em>camera</em> shake. This pins the <em>subject</em> — your head stays in the reticle while you or the phone move.</li>
+      <li>Use the front camera, put your face on the reticle, tap <strong>Lock</strong>.</li>
+      <li>Whip your head around. The main view should keep you glued. The Live inset is the unstabilized truth. If you leave the lens, the pin cannot invent pixels.</li>
     </ol>
     <p class="hint">
-      Phone: allow camera + motion. Desktop: lock, then use Shake camera / Move subject.
+      Phone: allow camera + motion. Front camera is default. Desktop: Lock, then Whip subject.
     </p>
     <button type="button" class="primary" id="start">Enable camera</button>
     <p class="error" id="gate-error" hidden></p>
@@ -47,9 +47,10 @@ app.innerHTML = `
   <section class="panel hud" id="hud" hidden>
     <p class="coach" id="coach"></p>
     <div class="actions">
-      <button type="button" class="primary" id="lock-btn">Lock subject</button>
+      <button type="button" class="primary" id="lock-btn">Lock</button>
       <button type="button" id="shake-btn" hidden>Shake camera</button>
-      <button type="button" id="nudge-btn" hidden>Move subject</button>
+      <button type="button" id="nudge-btn" hidden>Whip subject</button>
+      <button type="button" id="flip-btn" hidden>Flip camera</button>
     </div>
     <p class="status" id="status"></p>
   </section>
@@ -70,6 +71,7 @@ const stepsEl = app.querySelector<HTMLElement>('#steps')!
 const lockBtn = app.querySelector<HTMLButtonElement>('#lock-btn')!
 const shakeBtn = app.querySelector<HTMLButtonElement>('#shake-btn')!
 const nudgeBtn = app.querySelector<HTMLButtonElement>('#nudge-btn')!
+const flipBtn = app.querySelector<HTMLButtonElement>('#flip-btn')!
 
 const camera = new CameraFeed()
 const motion = new MotionTracker()
@@ -88,7 +90,16 @@ let pointerActive = false
 let pointerGyro = { x: 0, y: 0, z: 0 }
 let lastFrame = performance.now() / 1000
 let hudTick = 0
-let lastTrack = { foundX: 0, foundY: 0, score: 1, lost: false, clamped: false }
+let lastTrack = {
+  foundX: 0,
+  foundY: 0,
+  foundSize: 0,
+  score: 1,
+  lost: false,
+  clamped: false,
+  visual: true,
+  via: 'patch' as 'face' | 'patch',
+}
 
 function resize(): void {
   const dpr = Math.min(window.devicePixelRatio || 1, 2)
@@ -125,8 +136,8 @@ function subjectOffset(now: number): { x: number; y: number } {
   }
   // Starts at 0,0 so the tracker can follow instead of teleporting.
   return {
-    x: Math.sin(t * 1.35) * source.width * 0.13 * env,
-    y: (1 - Math.cos(t * 1.05)) * source.height * 0.055 * env,
+    x: Math.sin(t * 5.4) * source.width * 0.32 * env,
+    y: Math.sin(t * 4.1) * source.height * 0.22 * env,
   }
 }
 
@@ -137,6 +148,10 @@ function paintSource(time: number): void {
   sourceCtx.fillStyle = '#07080c'
   sourceCtx.fillRect(0, 0, width, height)
   if (camera.ready) {
+    if (camera.facing === 'user') {
+      sourceCtx.translate(width, 0)
+      sourceCtx.scale(-1, 1)
+    }
     drawCover(
       sourceCtx,
       camera.video,
@@ -145,6 +160,7 @@ function paintSource(time: number): void {
       width,
       height,
     )
+    sourceCtx.setTransform(1, 0, 0, 1, 0, 0)
     return
   }
   sceneCameraMatrix(motion.state, width, height).applyTo(sourceCtx)
@@ -205,33 +221,34 @@ function refreshChrome(): void {
     : lastTrack.lost
       ? 'Subject lost'
       : 'Locked'
-  lockBtn.textContent = locked ? 'Unlock' : 'Lock subject'
+  lockBtn.textContent = locked ? 'Unlock' : 'Lock'
   lockBtn.classList.toggle('danger', locked)
   shakeBtn.hidden = !locked
   nudgeBtn.hidden = !locked || camera.ready
+  flipBtn.hidden = camera.status !== 'live'
   pipWrap.hidden = !locked
   setStep(locked ? 3 : 2)
 
   if (!locked) {
     coachEl.textContent =
-      'Put the reticle on a subject, then tap Lock. After that, move the camera — the main view should freeze.'
+      'Front camera on. Put your face on the reticle, tap Lock, then move your head. It should stay glued.'
     statusEl.textContent = camera.ready
-      ? 'Live camera. Lock is visual + IMU: it pins whatever is under the reticle.'
-      : 'No camera here, so this is a test scene. Lock, then Shake camera or Move subject.'
+      ? 'Hard pin: the patch (or face) under the reticle is translated back to center every frame.'
+      : 'No camera — test scene. Lock, then Whip subject. The bullseye should stay on the reticle.'
     return
   }
-  if (lastTrack.lost) {
+  if (lastTrack.clamped) {
     coachEl.textContent =
-      'Tracking lost. Unlock, aim again, and lock on a high-contrast subject.'
-  } else if (lastTrack.clamped) {
+      'Crop limit. The pin used all of the 2.2× zoom. Stay more in-frame.'
+  } else if (lastTrack.lost) {
     coachEl.textContent =
-      'At the crop limit. Move back toward the lock pose — big pans will hit the edge of the zoomed frame.'
+      'Texture lost — gyro still cancelling camera motion. Aim at a face or a contrasty target and lock again.'
   } else {
     coachEl.textContent =
-      'Locked. Move the phone, or Move subject. Main view holds; Live inset still shakes.'
+      'Pinned. Move your head or the phone. Live inset is unstabilized.'
   }
-  const pct = Math.round(lastTrack.score * 100)
-  statusEl.textContent = `Tracking ${pct}% · inverse matrix on pixels`
+  const how = lastTrack.via === 'face' ? 'face' : 'patch'
+  statusEl.textContent = `${how} ${Math.round(lastTrack.score * 100)}% · ${motion.state.hasSensor ? 'IMU on' : 'no IMU'}`
 }
 
 function lockSubject(): void {
@@ -245,9 +262,12 @@ function lockSubject(): void {
   lastTrack = {
     foundX: source.width / 2,
     foundY: source.height / 2,
+    foundSize: tracker.lockSize,
     score: 1,
     lost: false,
     clamped: false,
+    visual: true,
+    via: 'patch',
   }
   refreshChrome()
 }
@@ -280,13 +300,19 @@ function frame(rawNow: number): void {
   let mat = cropOnly(width, height)
 
   if (locked) {
+    const shift = imageShiftFromImu(motion.state, width, height)
     const track = tracker.update(source, width, height)
+    const sizeScale =
+      track.via === 'face' && track.foundSize > 1
+        ? tracker.lockSize / track.foundSize
+        : 1
     const view = lockViewMatrix(
       width,
       height,
       track.foundX,
       track.foundY,
-      motion.state.yaw,
+      shift.yaw,
+      sizeScale,
     )
     mat = view.matrix
     lastTrack = { ...track, clamped: view.clamped }
@@ -357,7 +383,14 @@ shakeBtn.addEventListener('click', () => {
 nudgeBtn.addEventListener('click', () => {
   const now = performance.now() / 1000
   subjectMoveStart = now
-  subjectMoveEnd = now + 3.2
+  subjectMoveEnd = now + 4
+})
+
+flipBtn.addEventListener('click', () => {
+  void camera.flip().then(() => {
+    if (locked) unlockSubject()
+    refreshChrome()
+  })
 })
 
 stage.addEventListener('pointerdown', (event) => {

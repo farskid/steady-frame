@@ -2,6 +2,7 @@ export type CameraStatus = 'idle' | 'pending' | 'live' | 'denied' | 'missing'
 
 export class CameraFeed {
   readonly video = document.createElement('video')
+  facing: 'user' | 'environment' = 'user'
   status: CameraStatus = 'idle'
   error = ''
   private stream: MediaStream | null = null
@@ -25,7 +26,7 @@ export class CameraFeed {
       this.stream = await navigator.mediaDevices.getUserMedia({
         audio: false,
         video: {
-          facingMode: { ideal: 'environment' },
+          facingMode: { ideal: this.facing },
           width: { ideal: 1920 },
           height: { ideal: 1080 },
         },
@@ -46,6 +47,12 @@ export class CameraFeed {
         this.error = err instanceof Error ? err.message : 'Camera unavailable.'
       }
     }
+  }
+
+  async flip(): Promise<void> {
+    this.facing = this.facing === 'user' ? 'environment' : 'user'
+    this.stop()
+    await this.start()
   }
 
   stop(): void {
