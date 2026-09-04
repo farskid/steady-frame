@@ -34,10 +34,21 @@ export class KalmanCV {
     this.covTrace = 808
   }
 
+  /**
+   * `controlShift` is the extra displacement this frame that the CV model does
+   * not already carry (a change in camera flow). It moves the position now and
+   * bumps the velocity so the following frames carry it too.
+   */
   predict(dt: number, controlShift?: { x: number; y: number }): void {
     const t = dt
-    this.x += this.vx * t + (controlShift?.x ?? 0)
-    this.y += this.vy * t + (controlShift?.y ?? 0)
+    const cx = controlShift?.x ?? 0
+    const cy = controlShift?.y ?? 0
+    this.x += this.vx * t + cx
+    this.y += this.vy * t + cy
+    if (t > 1e-4) {
+      this.vx += cx / t
+      this.vy += cy / t
+    }
 
     // F = [[1,0,dt,0],[0,1,0,dt],[0,0,1,0],[0,0,0,1]]
     // P = F P Fᵀ + Q  (white-jerk / discrete white-noise acceleration, q ≈ 400)

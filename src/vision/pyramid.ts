@@ -1,6 +1,8 @@
-/** Image pyramid: grayscale + Scharr gradients, 3 levels, Gaussian decimation. */
+/** Image pyramid: grayscale + Scharr gradients, 4 levels, Gaussian decimation. */
 
-export const PYRAMID_LEVELS = 3
+// 4 levels: a hand-held rear camera moves the whole frame ~40 work-px between
+// frames on a quick pan; 3 levels (~±30 px) starved KLT there.
+export const PYRAMID_LEVELS = 4
 const GAUSS = 16
 
 export type Level = {

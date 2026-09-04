@@ -87,6 +87,8 @@ export class SubjectTracker {
    */
   private imuGainX = 1
   private imuGainY = 1
+  private lastPriorX = 0
+  private lastPriorY = 0
 
   private sx = 1
   private sy = 1
@@ -113,22 +115,35 @@ export class SubjectTracker {
     this.detector = createFaceDetector()
   }
 
-  lock(source: CanvasImageSource, srcW: number, srcH: number, x: number, y: number): boolean {
+  /**
+   * @param subjectRadius radius of the subject in SOURCE px (the ring the user
+   *   sees). Features are seeded inside it; nothing outside is ever eligible,
+   *   which is what keeps a distant rear-camera subject from being outvoted by
+   *   the wall behind it.
+   */
+  lock(
+    source: CanvasImageSource,
+    srcW: number,
+    srcH: number,
+    x: number,
+    y: number,
+    subjectRadius = 0.16 * Math.min(srcW, srcH),
+  ): boolean {
     this.grab(source, srcW, srcH)
     this.prevPyr.copyFrom(this.curPyr)
 
     const wx = x / this.sx
     const wy = y / this.sy
-    const srcRoi = 0.16 * Math.min(srcW, srcH)
-    this.roiWork = srcRoi / this.sx
+    this.roiWork = subjectRadius / this.sx
     this.lockRoiWork = this.roiWork
 
     const level = this.curPyr.levels[0]
-    let n = this.features.detect(level, { cx: wx, cy: wy, radius: this.roiWork * 0.6 }, this.pts, MAX_FEATURES)
+    // The ring IS the subject: seed right up to it rather than 60 % of it.
+    let n = this.features.detect(level, { cx: wx, cy: wy, radius: this.roiWork * 0.95 }, this.pts, MAX_FEATURES)
     if (n < EXPAND_BELOW) {
-      this.roiWork *= 1.5
+      this.roiWork *= 1.25
       this.lockRoiWork = this.roiWork
-      n = this.features.detect(level, { cx: wx, cy: wy, radius: this.roiWork * 0.6 }, this.pts, MAX_FEATURES)
+      n = this.features.detect(level, { cx: wx, cy: wy, radius: this.roiWork * 0.95 }, this.pts, MAX_FEATURES)
     }
     if (n < MIN_LOCK) {
       this.locked = false
@@ -158,6 +173,8 @@ export class SubjectTracker {
     this.ncc.capture(level, wx, wy)
     this.nccPoseTheta = 0
     this.nccPoseScale = 1
+    this.lastPriorX = 0
+    this.lastPriorY = 0
     this.faces = []
     return true
   }
@@ -192,18 +209,19 @@ export class SubjectTracker {
 
     const prevCx = this.centerWorkX
     const prevCy = this.centerWorkY
-    // Kalman velocity already includes camera flow; adding IMU again double-counts.
-    this.kf.predict(dt)
-    let dCx = this.kf.x - prevCx
-    let dCy = this.kf.y - prevCy
-    if (this.misses > 0) {
-      const px = priorW.x * this.imuGainX
-      const py = priorW.y * this.imuGainY
-      dCx += px
-      dCy += py
-      this.kf.x += px
-      this.kf.y += py
+    // The Kalman velocity already contains last frame's camera flow, so the
+    // full IMU shift would double-count. Its frame-to-frame CHANGE is the part
+    // constant-velocity cannot know: use that as the control input, scaled by
+    // the learned gain. A quick pan onset or reversal shows up here first.
+    const ctrl = {
+      x: (priorW.x - this.lastPriorX) * this.imuGainX,
+      y: (priorW.y - this.lastPriorY) * this.imuGainY,
     }
+    this.lastPriorX = priorW.x
+    this.lastPriorY = priorW.y
+    this.kf.predict(dt, ctrl)
+    const dCx = this.kf.x - prevCx
+    const dCy = this.kf.y - prevCy
 
     let via: TrackVia = 'pred'
     let visual = false

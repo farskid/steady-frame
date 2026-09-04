@@ -46,6 +46,13 @@ app.innerHTML = `
 
   <section class="panel hud" id="hud" hidden>
     <p class="coach" id="coach"></p>
+    <div class="setup" id="setup">
+      <label class="size">
+        <span>Subject size</span>
+        <input type="range" id="size" min="28" max="240" value="72" />
+      </label>
+      <select id="cam-select" aria-label="Camera" hidden></select>
+    </div>
     <div class="actions">
       <button type="button" class="primary" id="lock-btn">Lock</button>
       <button type="button" id="shake-btn" hidden>Shake camera</button>
@@ -74,6 +81,9 @@ const shakeBtn = app.querySelector<HTMLButtonElement>('#shake-btn')!
 const nudgeBtn = app.querySelector<HTMLButtonElement>('#nudge-btn')!
 const panBtn = app.querySelector<HTMLButtonElement>('#pan-btn')!
 const flipBtn = app.querySelector<HTMLButtonElement>('#flip-btn')!
+const setupEl = app.querySelector<HTMLElement>('#setup')!
+const sizeInput = app.querySelector<HTMLInputElement>('#size')!
+const camSelect = app.querySelector<HTMLSelectElement>('#cam-select')!
 
 const camera = new CameraFeed()
 const motion = new MotionTracker()
@@ -250,28 +260,33 @@ function refreshChrome(): void {
   shakeBtn.hidden = !locked
   nudgeBtn.hidden = !locked || camera.ready
   panBtn.hidden = !locked || camera.ready
-  flipBtn.hidden = camera.status !== 'live'
+  flipBtn.hidden = camera.status !== 'live' || camera.options.length > 1
+  setupEl.hidden = locked
+  camSelect.hidden = camera.status !== 'live' || camera.options.length < 2
   pipWrap.hidden = !locked
   setStep(locked ? 3 : 2)
 
   if (!locked) {
+    const rear = camera.ready && camera.facing === 'environment'
     coachEl.textContent =
       lockHint ||
-      'Front camera on. Put your face on the reticle, tap Lock, then move your head. It should stay glued.'
+      (rear
+        ? 'Rear camera. Size the ring to the subject — only what is inside it gets tracked. If your phone lists an ultra-wide lens, pick it: far subjects leave a normal lens on a small wrist turn.'
+        : 'Front camera. Fit the ring to your face, tap Lock, then move your head. It should stay glued.')
     statusEl.textContent = camera.ready
       ? 'Hard pin: the patch (or face) under the reticle is translated back to center every frame.'
-      : 'No camera — test scene. Lock, then Whip subject. The bullseye should stay on the reticle.'
+      : 'No camera — test scene. Lock, then Whip subject / Pan follow. The bullseye should stay on the reticle.'
     return
   }
   if (lastTrack.clamped) {
     coachEl.textContent =
-      'Pinned at the lens edge — black around the reticle is FOV, not a failed lock. Step back into frame.'
+      'Pinned at the lens edge — black around the reticle is FOV, not a failed lock. Bring the subject back toward the middle of the raw view (Live inset).'
   } else if (lastTrack.lost) {
     coachEl.textContent =
-      'Lost the texture. Unlock and lock again on your face.'
+      'Lost the texture. Unlock, fit the ring to the subject, and lock again.'
   } else {
     coachEl.textContent =
-      'Pinned to the reticle. Move your head. You should not be able to walk off-center until you leave the camera.'
+      'Pinned to the reticle. Move the subject or the phone. It should not leave center until it leaves the lens.'
   }
   const how = lastTrack.via
   const pts = lastTrack.features
@@ -288,10 +303,19 @@ function lockSubject(): void {
   const imu0 = imageShiftFromImu(motion.state, source.width, source.height)
   lastImuX = imu0.x
   lastImuY = imu0.y
-  const ok = tracker.lock(source, source.width, source.height, source.width / 2, source.height / 2)
+  // Ring is in CSS px; the source canvas is DPR-scaled.
+  const ringRadiusSrc = (Number(sizeInput.value) / 2) * (source.width / window.innerWidth)
+  const ok = tracker.lock(
+    source,
+    source.width,
+    source.height,
+    source.width / 2,
+    source.height / 2,
+    ringRadiusSrc,
+  )
   if (!ok) {
     lockHint =
-      'Not enough texture — put your face or a contrasty object on the reticle.'
+      'Not enough texture inside the ring — make it bigger or aim at something with detail.'
     refreshChrome()
     return
   }
@@ -406,8 +430,39 @@ async function start(): Promise<void> {
     sourcePill.textContent = 'Test scene'
     sourcePill.classList.add('fallback')
   }
+  populateCameras()
   refreshChrome()
 }
+
+function populateCameras(): void {
+  camSelect.innerHTML = ''
+  for (const opt of camera.options) {
+    const o = document.createElement('option')
+    o.value = opt.deviceId
+    o.textContent = opt.label
+    o.selected = opt.deviceId === camera.deviceId
+    camSelect.appendChild(o)
+  }
+}
+
+function applyRingSize(): void {
+  reticle.style.setProperty('--ring', `${sizeInput.value}px`)
+}
+
+sizeInput.addEventListener('input', applyRingSize)
+// Default ring ≈ a face at arm's length / the test-scene bullseye.
+sizeInput.value = String(
+  Math.max(28, Math.min(240, Math.round(Math.min(window.innerWidth, window.innerHeight) * 0.2))),
+)
+applyRingSize()
+
+camSelect.addEventListener('change', () => {
+  void camera.select(camSelect.value).then(() => {
+    if (locked) unlockSubject()
+    populateCameras()
+    refreshChrome()
+  })
+})
 
 app.querySelector('#start')!.addEventListener('click', () => {
   void start()
@@ -437,6 +492,7 @@ panBtn.addEventListener('click', () => startWhip(true))
 flipBtn.addEventListener('click', () => {
   void camera.flip().then(() => {
     if (locked) unlockSubject()
+    populateCameras()
     refreshChrome()
   })
 })

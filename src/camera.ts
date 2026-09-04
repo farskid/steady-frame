@@ -1,8 +1,12 @@
 export type CameraStatus = 'idle' | 'pending' | 'live' | 'denied' | 'missing'
 
+export type CameraOption = { deviceId: string; label: string; facing: 'user' | 'environment' | 'unknown' }
+
 export class CameraFeed {
   readonly video = document.createElement('video')
   facing: 'user' | 'environment' = 'user'
+  deviceId: string | null = null
+  options: CameraOption[] = []
   status: CameraStatus = 'idle'
   error = ''
   private stream: MediaStream | null = null
@@ -23,17 +27,20 @@ export class CameraFeed {
     this.status = 'pending'
     this.error = ''
     try {
-      this.stream = await navigator.mediaDevices.getUserMedia({
-        audio: false,
-        video: {
-          facingMode: { ideal: this.facing },
-          width: { ideal: 1920 },
-          height: { ideal: 1080 },
-        },
-      })
+      const video: MediaTrackConstraints = {
+        width: { ideal: 1920 },
+        height: { ideal: 1080 },
+        // 60 fps halves per-frame displacement, which is what KLT range is about.
+        frameRate: { ideal: 60 },
+      }
+      if (this.deviceId) video.deviceId = { exact: this.deviceId }
+      else video.facingMode = { ideal: this.facing }
+      this.stream = await navigator.mediaDevices.getUserMedia({ audio: false, video })
       this.video.srcObject = this.stream
       await this.video.play()
       this.status = 'live'
+      this.syncFacingFromTrack()
+      await this.refreshOptions()
     } catch (err) {
       const name = err instanceof DOMException ? err.name : ''
       if (name === 'NotAllowedError' || name === 'PermissionDeniedError') {
@@ -51,6 +58,15 @@ export class CameraFeed {
 
   async flip(): Promise<void> {
     this.facing = this.facing === 'user' ? 'environment' : 'user'
+    this.deviceId = null
+    this.stop()
+    await this.start()
+  }
+
+  async select(deviceId: string): Promise<void> {
+    this.deviceId = deviceId
+    const opt = this.options.find((o) => o.deviceId === deviceId)
+    if (opt && opt.facing !== 'unknown') this.facing = opt.facing
     this.stop()
     await this.start()
   }
@@ -61,6 +77,38 @@ export class CameraFeed {
     this.video.srcObject = null
     this.status = 'idle'
   }
+
+  private syncFacingFromTrack(): void {
+    const track = this.stream?.getVideoTracks()[0]
+    const settings = track?.getSettings()
+    if (settings?.facingMode === 'user' || settings?.facingMode === 'environment') {
+      this.facing = settings.facingMode
+    }
+    if (settings?.deviceId) this.deviceId = settings.deviceId
+  }
+
+  /** Labels are only populated after permission, so call this post-start. */
+  private async refreshOptions(): Promise<void> {
+    try {
+      const devices = await navigator.mediaDevices.enumerateDevices()
+      this.options = devices
+        .filter((d) => d.kind === 'videoinput')
+        .map((d, i) => ({
+          deviceId: d.deviceId,
+          label: d.label || `Camera ${i + 1}`,
+          facing: guessFacing(d.label),
+        }))
+    } catch {
+      this.options = []
+    }
+  }
+}
+
+function guessFacing(label: string): CameraOption['facing'] {
+  const l = label.toLowerCase()
+  if (/front|user|selfie|facetime/.test(l)) return 'user'
+  if (/back|rear|environment|world/.test(l)) return 'environment'
+  return 'unknown'
 }
 
 export function drawCover(
