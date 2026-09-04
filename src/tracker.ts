@@ -220,16 +220,7 @@ export class SubjectTracker {
         const jumpPred = Math.hypot(dCx, dCy)
         const jumpMeas = Math.hypot(meas.x - prevCx, meas.y - prevCy)
         const backgroundMotion = jumpPred > 4 && jumpMeas < jumpPred * 0.4
-        const dNcc = this.nccDelta()
-        const appear = this.ncc.scoreAt(
-          this.curPyr.levels[0],
-          meas.x,
-          meas.y,
-          dNcc.theta,
-          dNcc.scale,
-        )
-        const appearFail = appear >= 0 && appear < 0.25
-        if (backgroundMotion || appearFail || this.inlierCentroidFar(n, sim.inliers)) {
+        if (backgroundMotion || this.inlierCentroidFar(n, sim.inliers)) {
           this.miss()
           this.coastFeatures(n, dCx, dCy)
         } else {
