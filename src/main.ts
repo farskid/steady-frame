@@ -141,6 +141,9 @@ function subjectOffset(now: number): { x: number; y: number } {
     }
     env = 1 - u * u
   }
+  // Ramp in so the phase-shifted y term does not teleport on the first frame.
+  const rampIn = Math.min(1, t / 0.2)
+  env *= rampIn * rampIn
   // Starts at 0,0 so the tracker can follow instead of teleporting.
   // Peak |dx/dt| = 0.72 of frame width/s (sin ωt, ωA = 0.72), with reversals.
   const ax = source.width * 0.3
@@ -411,6 +414,8 @@ shakeBtn.addEventListener('click', () => {
 
 nudgeBtn.addEventListener('click', () => {
   const now = performance.now() / 1000
+  // Restarting mid-whip (or mid-fade) would teleport the target; ignore.
+  if (subjectMoveStart > 0 && now < subjectMoveEnd + 0.5) return
   subjectMoveStart = now
   subjectMoveEnd = now + 4
 })
