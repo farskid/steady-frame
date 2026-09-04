@@ -217,43 +217,48 @@ export class SubjectTracker {
         this.coastFeatures(n, dCx, dCy)
       } else {
         const meas = applySimilarity(sim, prevCx, prevCy)
-        const r = measurementR(sim.rms, sim.inlierCount)
-        const accepted = this.kf.update(meas.x, meas.y, r)
-        if (!accepted) {
+        if (this.inlierCentroidFar(n, sim.inliers)) {
           this.miss()
           this.coastFeatures(n, dCx, dCy)
         } else {
-          this.misses = 0
-          this.lost = false
-          this.lostFrames = 0
-          this.rotation += sim.theta
-          this.rawScale *= sim.s
-          this.rawScale = clamp(this.rawScale, 0.5, 2)
-          this.scale = this.scaleSm.observe(this.rawScale)
-          this.roiWork = clamp(this.roiWork * sim.s, this.lockRoiWork * 0.5, this.lockRoiWork * 2)
-          inlierCount = sim.inlierCount
-          via = 'klt'
-          visual = true
-          this.compactInliers(n, sim.inliers)
-          if (
-            this.featCount < REPLENISH_BELOW &&
-            this.misses === 0 &&
-            inlierCount >= REPLENISH_INLIERS
-          ) {
-            this.featCount = this.features.replenish(
-              this.curPyr.levels[0],
-              this.pts,
-              this.featCount,
-              { cx: this.kf.x, cy: this.kf.y, radius: this.roiWork * 0.82 },
-              MAX_FEATURES,
-            )
-          }
-          this.framesSinceRefresh += 1
-          if (inlierCount >= REFRESH_INLIERS && this.framesSinceRefresh >= REFRESH_GAP) {
-            this.ncc.capture(this.curPyr.levels[0], this.kf.x, this.kf.y)
-            this.nccPoseTheta = this.rotation
-            this.nccPoseScale = this.scale
-            this.framesSinceRefresh = 0
+          const r = measurementR(sim.rms, sim.inlierCount)
+          const accepted = this.kf.update(meas.x, meas.y, r)
+          if (!accepted) {
+            this.miss()
+            this.coastFeatures(n, dCx, dCy)
+          } else {
+            this.misses = 0
+            this.lost = false
+            this.lostFrames = 0
+            this.rotation += sim.theta
+            this.rawScale *= sim.s
+            this.rawScale = clamp(this.rawScale, 0.5, 2)
+            this.scale = this.scaleSm.observe(this.rawScale)
+            this.roiWork = clamp(this.roiWork * sim.s, this.lockRoiWork * 0.5, this.lockRoiWork * 2)
+            inlierCount = sim.inlierCount
+            via = 'klt'
+            visual = true
+            this.compactInliers(n, sim.inliers)
+            if (
+              this.featCount < REPLENISH_BELOW &&
+              this.misses === 0 &&
+              inlierCount >= REPLENISH_INLIERS
+            ) {
+              this.featCount = this.features.replenish(
+                this.curPyr.levels[0],
+                this.pts,
+                this.featCount,
+                { cx: this.kf.x, cy: this.kf.y, radius: this.roiWork * 0.6 },
+                MAX_FEATURES,
+              )
+            }
+            this.framesSinceRefresh += 1
+            if (inlierCount >= REFRESH_INLIERS && this.framesSinceRefresh >= REFRESH_GAP) {
+              this.ncc.capture(this.curPyr.levels[0], this.kf.x, this.kf.y)
+              this.nccPoseTheta = this.rotation
+              this.nccPoseScale = this.scale
+              this.framesSinceRefresh = 0
+            }
           }
         }
       }
@@ -311,6 +316,23 @@ export class SubjectTracker {
     }
   }
 
+  private inlierCentroidFar(n: number, inliers: Uint8Array): boolean {
+    let sx = 0
+    let sy = 0
+    let c = 0
+    for (let i = 0; i < n; i++) {
+      if (!inliers[i]) continue
+      sx += this.nextPts[i * 2]
+      sy += this.nextPts[i * 2 + 1]
+      c += 1
+    }
+    if (c === 0) return true
+    const lim = this.roiWork * 0.5
+    const dx = sx / c - this.kf.x
+    const dy = sy / c - this.kf.y
+    return dx * dx + dy * dy > lim * lim
+  }
+
   private coastFeatures(n: number, dCx: number, dCy: number): void {
     for (let i = 0; i < n; i++) {
       this.pts[i * 2] += dCx
@@ -321,7 +343,7 @@ export class SubjectTracker {
   private compactInliers(n: number, inliers: Uint8Array): void {
     const cx = this.kf.x
     const cy = this.kf.y
-    const r2 = this.roiWork * this.roiWork
+    const r2 = (this.roiWork * 0.75) * (this.roiWork * 0.75)
     let k = 0
     for (let i = 0; i < n; i++) {
       if (!inliers[i]) continue
