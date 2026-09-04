@@ -14,7 +14,7 @@ import { applySimilarity, SimilarityRansac } from './vision/ransac.ts'
 export const WORK_W = 480
 const MISS_LIMIT = 6
 const MIN_LOCK = 8
-const EXPAND_BELOW = 12
+const EXPAND_BELOW = 20
 const REPLENISH_BELOW = 28
 const REPLENISH_INLIERS = 15
 const REFRESH_INLIERS = 20
@@ -109,7 +109,7 @@ export class SubjectTracker {
 
     const wx = x / this.sx
     const wy = y / this.sy
-    const srcRoi = 0.125 * Math.min(srcW, srcH)
+    const srcRoi = 0.16 * Math.min(srcW, srcH)
     this.roiWork = srcRoi / this.sx
     this.lockRoiWork = this.roiWork
 
@@ -217,7 +217,10 @@ export class SubjectTracker {
         this.coastFeatures(n, dCx, dCy)
       } else {
         const meas = applySimilarity(sim, prevCx, prevCy)
-        if (this.inlierCentroidFar(n, sim.inliers)) {
+        const jumpPred = Math.hypot(dCx, dCy)
+        const jumpMeas = Math.hypot(meas.x - prevCx, meas.y - prevCy)
+        const backgroundMotion = jumpPred > 4 && jumpMeas < jumpPred * 0.4
+        if (backgroundMotion || this.inlierCentroidFar(n, sim.inliers)) {
           this.miss()
           this.coastFeatures(n, dCx, dCy)
         } else {
