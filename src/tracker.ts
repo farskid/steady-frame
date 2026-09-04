@@ -182,9 +182,16 @@ export class SubjectTracker {
 
     const prevCx = this.centerWorkX
     const prevCy = this.centerWorkY
-    this.kf.predict(dt, priorW)
-    const dCx = this.kf.x - prevCx
-    const dCy = this.kf.y - prevCy
+    // Kalman velocity already includes camera flow; adding IMU again double-counts.
+    this.kf.predict(dt)
+    let dCx = this.kf.x - prevCx
+    let dCy = this.kf.y - prevCy
+    if (this.misses > 0) {
+      dCx += priorW.x
+      dCy += priorW.y
+      this.kf.x += priorW.x
+      this.kf.y += priorW.y
+    }
 
     let via: TrackVia = 'pred'
     let visual = false
@@ -215,7 +222,7 @@ export class SubjectTracker {
       const sim = this.ransac.estimate(this.pts, this.nextPts, this.status, n)
       if (!sim || sim.inlierCount < MIN_ACCEPT_INLIERS) {
         this.miss()
-        this.keepTrackedFeatures(n, dCx, dCy)
+        this.keepTrackedFeatures(n)
       } else {
         const shift = this.inlierShift(n, sim.inliers)
         const meas = shift
@@ -226,13 +233,13 @@ export class SubjectTracker {
         const backgroundMotion = jumpPred > 4 && jumpMeas < jumpPred * 0.4
         if (backgroundMotion || this.inlierCentroidFar(n, sim.inliers)) {
           this.miss()
-          this.keepTrackedFeatures(n, dCx, dCy)
+          this.keepTrackedFeatures(n)
         } else {
           const r = measurementR(sim.rms, sim.inlierCount)
           const accepted = this.kf.update(meas.x, meas.y, r, sim.inlierCount >= 16)
           if (!accepted) {
             this.miss()
-            this.keepTrackedFeatures(n, dCx, dCy)
+            this.keepTrackedFeatures(n)
           } else {
             this.misses = 0
             this.lost = false
@@ -248,16 +255,20 @@ export class SubjectTracker {
             via = 'klt'
             visual = true
             this.compactInliers(n, sim.inliers)
-            if (
-              this.featCount < REPLENISH_BELOW &&
-              this.misses === 0 &&
-              inlierCount >= REPLENISH_INLIERS
-            ) {
+            if (this.featCount < REPLENISH_BELOW && this.misses === 0) {
               this.featCount = this.features.replenish(
                 this.curPyr.levels[0],
                 this.pts,
                 this.featCount,
                 { cx: this.kf.x, cy: this.kf.y, radius: this.roiWork * 0.6 },
+                MAX_FEATURES,
+              )
+            }
+            if (this.featCount < 12) {
+              this.featCount = this.features.detect(
+                this.curPyr.levels[0],
+                { cx: this.kf.x, cy: this.kf.y, radius: this.roiWork * 0.6 },
+                this.pts,
                 MAX_FEATURES,
               )
             }
@@ -360,7 +371,7 @@ export class SubjectTracker {
   }
 
   /** Keep surviving KLT points instead of teleporting them with a wrong prior. */
-  private keepTrackedFeatures(n: number, dCx: number, dCy: number): void {
+  private keepTrackedFeatures(n: number): void {
     let k = 0
     for (let i = 0; i < n; i++) {
       if (!this.status[i]) continue
@@ -369,7 +380,6 @@ export class SubjectTracker {
       k += 1
     }
     if (k >= MIN_LOCK) this.featCount = k
-    else this.coastFeatures(n, dCx, dCy)
   }
 
   /** Translation of the inlier cloud — ignores a noisy RANSAC θ about the origin. */
@@ -407,13 +417,6 @@ export class SubjectTracker {
     const dx = sx / c - this.kf.x
     const dy = sy / c - this.kf.y
     return dx * dx + dy * dy > lim * lim
-  }
-
-  private coastFeatures(n: number, dCx: number, dCy: number): void {
-    for (let i = 0; i < n; i++) {
-      this.pts[i * 2] += dCx
-      this.pts[i * 2 + 1] += dCy
-    }
   }
 
   private compactInliers(n: number, inliers: Uint8Array): void {
