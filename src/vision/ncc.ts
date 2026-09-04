@@ -32,8 +32,11 @@ export class NccMatcher {
   cSumT2 = 0
   lastScore = 0
 
-  scoreAt(level: Level, cx: number, cy: number): number {
-    return nccAt(level.gray, level.w, level.h, cx, cy, this.templ, TEMPLATE, this.sumT, this.sumT2, true)
+  scoreAt(level: Level, cx: number, cy: number, theta = 0, scale = 1): number {
+    if (isIdentity(theta, scale)) {
+      return nccAt(level.gray, level.w, level.h, cx, cy, this.templ, TEMPLATE, this.sumT, this.sumT2, true)
+    }
+    return nccWarped(level, cx, cy, this.templ, this.sumT, this.sumT2, theta, scale)
   }
 
   capture(level: Level, cx: number, cy: number): void {
@@ -145,6 +148,8 @@ export class NccMatcher {
     cx: number,
     cy: number,
     radius: number,
+    theta = 0,
+    scale = 1,
   ): { x: number; y: number; ncc: number } | null {
     const { gray, w, h } = level
     const x0 = Math.max(HALF, Math.floor(cx - radius))
@@ -152,12 +157,15 @@ export class NccMatcher {
     const y0 = Math.max(HALF, Math.floor(cy - radius))
     const y1 = Math.min(h - 1 - HALF, Math.ceil(cy + radius))
     if (x1 <= x0 || y1 <= y0) return null
+    const warped = !isIdentity(theta, scale)
     let best = -1
     let bx = cx
     let by = cy
     for (let y = y0; y <= y1; y += 2) {
       for (let x = x0; x <= x1; x += 2) {
-        const s = nccAt(gray, w, h, x, y, this.templ, TEMPLATE, this.sumT, this.sumT2, true)
+        const s = warped
+          ? nccWarped(level, x, y, this.templ, this.sumT, this.sumT2, theta, scale)
+          : nccAt(gray, w, h, x, y, this.templ, TEMPLATE, this.sumT, this.sumT2, true)
         if (s > best) {
           best = s
           bx = x
@@ -171,7 +179,9 @@ export class NccMatcher {
     const ry1 = Math.min(h - 1 - HALF, Math.ceil(by) + 2)
     for (let y = ry0; y <= ry1; y++) {
       for (let x = rx0; x <= rx1; x++) {
-        const s = nccAt(gray, w, h, x, y, this.templ, TEMPLATE, this.sumT, this.sumT2, true)
+        const s = warped
+          ? nccWarped(level, x, y, this.templ, this.sumT, this.sumT2, theta, scale)
+          : nccAt(gray, w, h, x, y, this.templ, TEMPLATE, this.sumT, this.sumT2, true)
         if (s > best) {
           best = s
           bx = x
@@ -221,6 +231,57 @@ function nccAt(
     }
   }
   if (disk) n = NMASK
+  const num = n * sumIT - sumI * sumT
+  const denI = n * sumI2 - sumI * sumI
+  const denT = n * sumT2 - sumT * sumT
+  if (denI <= 1e-6 || denT <= 1e-6) return -1
+  const ncc = num / Math.sqrt(denI * denT)
+  if (!Number.isFinite(ncc)) return -1
+  return ncc
+}
+
+function isIdentity(theta: number, scale: number): boolean {
+  return scale > 0.995 && scale < 1.005 && theta > -0.02 && theta < 0.02
+}
+
+/** Pull image pixels into the template frame via inverse similarity. */
+function nccWarped(
+  level: Level,
+  cx: number,
+  cy: number,
+  templ: Float32Array,
+  sumT: number,
+  sumT2: number,
+  theta: number,
+  scale: number,
+): number {
+  const { gray, w, h } = level
+  const c = Math.cos(theta)
+  const s = Math.sin(theta)
+  let sumI = 0
+  let sumI2 = 0
+  let sumIT = 0
+  let t = 0
+  for (let y = 0; y < TEMPLATE; y++) {
+    const dy = y + 0.5 - HALF
+    for (let x = 0; x < TEMPLATE; x++) {
+      if (!MASK[t]) {
+        t += 1
+        continue
+      }
+      const dx = x + 0.5 - HALF
+      const ix = cx + scale * (c * dx - s * dy)
+      const iy = cy + scale * (s * dx + c * dy)
+      if (ix < 0 || iy < 0 || ix > w - 1 || iy > h - 1) return -1
+      const g = sampleBuf(gray, w, h, ix, iy)
+      const tv = templ[t]
+      sumI += g
+      sumI2 += g * g
+      sumIT += g * tv
+      t += 1
+    }
+  }
+  const n = NMASK
   const num = n * sumIT - sumI * sumT
   const denI = n * sumI2 - sumI * sumI
   const denT = n * sumT2 - sumT * sumT

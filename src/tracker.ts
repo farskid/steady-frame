@@ -17,9 +17,10 @@ const MIN_LOCK = 8
 const EXPAND_BELOW = 12
 const REPLENISH_BELOW = 28
 const REPLENISH_INLIERS = 15
-const REFRESH_INLIERS = 25
-const REFRESH_GAP = 10
+const REFRESH_INLIERS = 20
+const REFRESH_GAP = 6
 const NCC_CONFIRM = 0.38
+const MIN_ACCEPT_INLIERS = 8
 
 export type TrackVia = 'klt' | 'pred' | 'ncc' | 'face' | 'patch' | 'color'
 
@@ -88,6 +89,8 @@ export class SubjectTracker {
   private lostFrames = 0
   private framesSinceRefresh = 0
   private lastT = 0
+  private nccPoseTheta = 0
+  private nccPoseScale = 1
 
   private faces: FaceBox[] = []
   private detecting = false
@@ -143,6 +146,8 @@ export class SubjectTracker {
     this.score = 1
     this.lastT = performance.now()
     this.ncc.capture(level, wx, wy)
+    this.nccPoseTheta = 0
+    this.nccPoseScale = 1
     this.faces = []
     return true
   }
@@ -208,15 +213,14 @@ export class SubjectTracker {
       )
       this.rejectAgainstPrior(n, dCx, dCy)
       const sim = this.ransac.estimate(this.pts, this.nextPts, this.status, n)
-      if (!sim) {
+      if (!sim || sim.inlierCount < MIN_ACCEPT_INLIERS) {
         this.miss()
         this.coastFeatures(n, dCx, dCy)
         this.snapCenter()
       } else {
         const meas = applySimilarity(sim, prevCx, prevCy)
-        const appear = this.ncc.scoreAt(this.curPyr.levels[0], meas.x, meas.y)
         const r = measurementR(sim.rms, sim.inlierCount)
-        const accepted = appear >= NCC_CONFIRM && this.kf.update(meas.x, meas.y, r)
+        const accepted = this.kf.update(meas.x, meas.y, r)
         if (!accepted) {
           this.miss()
           this.coastFeatures(n, dCx, dCy)
@@ -248,12 +252,10 @@ export class SubjectTracker {
             )
           }
           this.framesSinceRefresh += 1
-          if (
-            inlierCount >= REFRESH_INLIERS &&
-            this.framesSinceRefresh >= REFRESH_GAP &&
-            appear >= 0.7
-          ) {
+          if (inlierCount >= REFRESH_INLIERS && this.framesSinceRefresh >= REFRESH_GAP) {
             this.ncc.capture(this.curPyr.levels[0], this.kf.x, this.kf.y)
+            this.nccPoseTheta = this.rotation
+            this.nccPoseScale = this.scale
             this.framesSinceRefresh = 0
           }
         }
@@ -289,8 +291,14 @@ export class SubjectTracker {
     }
   }
 
+  private nccDelta(): { theta: number; scale: number } {
+    const scale = this.nccPoseScale > 1e-6 ? this.scale / this.nccPoseScale : 1
+    return { theta: this.rotation - this.nccPoseTheta, scale }
+  }
+
   private snapCenter(): number {
-    const hit = this.ncc.snap(this.curPyr.levels[0], this.kf.x, this.kf.y, 12)
+    const d = this.nccDelta()
+    const hit = this.ncc.snap(this.curPyr.levels[0], this.kf.x, this.kf.y, 12, d.theta, d.scale)
     if (!hit || hit.ncc < NCC_CONFIRM) return hit?.ncc ?? -1
     this.kf.x += (hit.x - this.kf.x) * 0.7
     this.kf.y += (hit.y - this.kf.y) * 0.7
