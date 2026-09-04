@@ -114,11 +114,11 @@ export class SubjectTracker {
     this.lockRoiWork = this.roiWork
 
     const level = this.curPyr.levels[0]
-    let n = this.features.detect(level, { cx: wx, cy: wy, radius: this.roiWork }, this.pts, MAX_FEATURES)
+    let n = this.features.detect(level, { cx: wx, cy: wy, radius: this.roiWork * 0.6 }, this.pts, MAX_FEATURES)
     if (n < EXPAND_BELOW) {
       this.roiWork *= 1.5
       this.lockRoiWork = this.roiWork
-      n = this.features.detect(level, { cx: wx, cy: wy, radius: this.roiWork }, this.pts, MAX_FEATURES)
+      n = this.features.detect(level, { cx: wx, cy: wy, radius: this.roiWork * 0.6 }, this.pts, MAX_FEATURES)
     }
     if (n < MIN_LOCK) {
       this.locked = false
@@ -314,7 +314,7 @@ export class SubjectTracker {
       if (this.featCount < MIN_LOCK) {
         this.featCount = this.features.detect(
           this.curPyr.levels[0],
-          { cx: this.kf.x, cy: this.kf.y, radius: this.roiWork },
+          { cx: this.kf.x, cy: this.kf.y, radius: this.roiWork * 0.6 },
           this.pts,
           MAX_FEATURES,
         )
@@ -409,7 +409,7 @@ export class SubjectTracker {
     this.lostFrames = 0
     this.featCount = this.features.detect(
       this.curPyr.levels[0],
-      { cx: hit.x, cy: hit.y, radius: this.roiWork },
+      { cx: hit.x, cy: hit.y, radius: this.roiWork * 0.6 },
       this.pts,
       MAX_FEATURES,
     )
