@@ -65,8 +65,10 @@ export class KltTracker {
       const ox = prevPts[i * 2]
       const oy = prevPts[i * 2 + 1]
       this.trackOne(cur, prev, nx, ny, ox, oy)
+      const fwd = Math.hypot(nx - ox, ny - oy)
+      const fbLim = Math.max(FB_THRESH, 1 + 0.25 * fwd)
       const fb = Math.hypot(this.hit.x - ox, this.hit.y - oy)
-      if (!this.hit.ok || fb > FB_THRESH) {
+      if (!this.hit.ok || fb > fbLim) {
         status[i] = 0
         error[i] = this.hit.ok ? fb : this.hit.err
         nextPts[i * 2] = nx
