@@ -269,8 +269,13 @@ export class SubjectTracker {
     this.foundX = this.centerWorkX * this.sx
     this.foundY = this.centerWorkY * this.sy
     this.foundSize = this.lockSize * this.scale
-    this.score = clamp((inlierCount / 30) * (1 - this.misses / MISS_LIMIT), 0, 1)
-    if (this.lost) this.score = 0
+    if (this.lost) {
+      this.score = 0
+    } else if (via === 'pred') {
+      this.score = 1 / (1 + this.kf.covTrace / 400)
+    } else {
+      this.score = clamp((inlierCount / 30) * (1 - this.misses / MISS_LIMIT), 0, 1)
+    }
 
     const tmp = this.prevPyr
     this.prevPyr = this.curPyr
