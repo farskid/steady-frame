@@ -339,12 +339,11 @@ export class SubjectTracker {
     const d = this.nccDelta()
     const level = this.curPyr.levels[0]
     const here = this.ncc.scoreAt(level, this.kf.x, this.kf.y, d.theta, d.scale)
-    if (here < 0 || here >= 0.72) return
-    const radius = here < 0.4 ? 14 : 8
-    const hit = this.ncc.snap(level, this.kf.x, this.kf.y, radius, d.theta, d.scale)
-    if (!hit || hit.ncc < Math.max(0.68, here + 0.08)) return
-    this.kf.x += (hit.x - this.kf.x) * 0.45
-    this.kf.y += (hit.y - this.kf.y) * 0.45
+    if (here < 0 || here >= 0.55) return
+    const hit = this.ncc.snap(level, this.kf.x, this.kf.y, 10, d.theta, d.scale)
+    if (!hit || hit.ncc < here + 0.12 || hit.ncc < 0.62) return
+    this.kf.x += (hit.x - this.kf.x) * 0.4
+    this.kf.y += (hit.y - this.kf.y) * 0.4
   }
 
   private miss(): void {
