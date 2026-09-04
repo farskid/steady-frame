@@ -7,6 +7,21 @@ export const NCC_ACCEPT = 0.6
 const COARSE = TEMPLATE >> 2
 const HALF = TEMPLATE >> 1
 const HALF_C = COARSE >> 1
+const MASK = new Uint8Array(TEMPLATE * TEMPLATE)
+let NMASK = 0
+{
+  const r2 = (HALF - 1) * (HALF - 1)
+  let i = 0
+  for (let y = 0; y < TEMPLATE; y++) {
+    for (let x = 0; x < TEMPLATE; x++) {
+      const dx = x + 0.5 - HALF
+      const dy = y + 0.5 - HALF
+      const on = dx * dx + dy * dy <= r2
+      MASK[i++] = on ? 1 : 0
+      if (on) NMASK += 1
+    }
+  }
+}
 
 export class NccMatcher {
   readonly templ = new Float32Array(TEMPLATE * TEMPLATE)
@@ -17,6 +32,10 @@ export class NccMatcher {
   cSumT2 = 0
   lastScore = 0
 
+  scoreAt(level: Level, cx: number, cy: number): number {
+    return nccAt(level.gray, level.w, level.h, cx, cy, this.templ, TEMPLATE, this.sumT, this.sumT2, true)
+  }
+
   capture(level: Level, cx: number, cy: number): void {
     const { gray, w, h } = level
     const templ = this.templ
@@ -26,9 +45,12 @@ export class NccMatcher {
     for (let y = 0; y < TEMPLATE; y++) {
       for (let x = 0; x < TEMPLATE; x++) {
         const v = sampleBuf(gray, w, h, cx - HALF + x + 0.5, cy - HALF + y + 0.5)
-        templ[i++] = v
-        sum += v
-        sum2 += v * v
+        templ[i] = v
+        if (MASK[i]) {
+          sum += v
+          sum2 += v * v
+        }
+        i += 1
       }
     }
     this.sumT = sum
@@ -71,7 +93,7 @@ export class NccMatcher {
     hintY?: number,
   ): { x: number; y: number; ncc: number } | null {
     if (hintX != null && hintY != null) {
-      const hit = this.refine(fine, hintX, hintY, HALF)
+      const hit = this.snap(fine, hintX, hintY, HALF)
       if (hit && hit.ncc >= NCC_ACCEPT) {
         this.lastScore = hit.ncc
         return hit
@@ -83,7 +105,7 @@ export class NccMatcher {
     const cpy = predY / scale
     const coarseHit = this.searchCoarse(coarseLevel, cpx, cpy, cr)
     if (!coarseHit) return null
-    const hit = this.refine(fine, coarseHit.x * scale, coarseHit.y * scale, 8)
+    const hit = this.snap(fine, coarseHit.x * scale, coarseHit.y * scale, 8)
     if (!hit || hit.ncc < NCC_ACCEPT) return null
     this.lastScore = hit.ncc
     return hit
@@ -118,7 +140,7 @@ export class NccMatcher {
     return { x: bx, y: by, ncc: best }
   }
 
-  private refine(
+  snap(
     level: Level,
     cx: number,
     cy: number,
@@ -135,7 +157,7 @@ export class NccMatcher {
     let by = cy
     for (let y = y0; y <= y1; y += 2) {
       for (let x = x0; x <= x1; x += 2) {
-        const s = nccAt(gray, w, h, x, y, this.templ, TEMPLATE, this.sumT, this.sumT2)
+        const s = nccAt(gray, w, h, x, y, this.templ, TEMPLATE, this.sumT, this.sumT2, true)
         if (s > best) {
           best = s
           bx = x
@@ -149,7 +171,7 @@ export class NccMatcher {
     const ry1 = Math.min(h - 1 - HALF, Math.ceil(by) + 2)
     for (let y = ry0; y <= ry1; y++) {
       for (let x = rx0; x <= rx1; x++) {
-        const s = nccAt(gray, w, h, x, y, this.templ, TEMPLATE, this.sumT, this.sumT2)
+        const s = nccAt(gray, w, h, x, y, this.templ, TEMPLATE, this.sumT, this.sumT2, true)
         if (s > best) {
           best = s
           bx = x
@@ -171,12 +193,13 @@ function nccAt(
   size: number,
   sumT: number,
   sumT2: number,
+  disk = false,
 ): number {
   const half = size >> 1
   const x0 = (cx - half) | 0
   const y0 = (cy - half) | 0
   if (x0 < 0 || y0 < 0 || x0 + size > w || y0 + size > h) return -1
-  const n = size * size
+  let n = 0
   let sumI = 0
   let sumI2 = 0
   let sumIT = 0
@@ -184,13 +207,20 @@ function nccAt(
   for (let y = 0; y < size; y++) {
     let i = (y0 + y) * w + x0
     for (let x = 0; x < size; x++) {
-      const g = gray[i++]
-      const tv = templ[t++]
-      sumI += g
-      sumI2 += g * g
-      sumIT += g * tv
+      const use = !disk || MASK[t] === 1
+      if (use) {
+        const g = gray[i]
+        const tv = templ[t]
+        sumI += g
+        sumI2 += g * g
+        sumIT += g * tv
+        n += 1
+      }
+      i += 1
+      t += 1
     }
   }
+  if (disk) n = NMASK
   const num = n * sumIT - sumI * sumT
   const denI = n * sumI2 - sumI * sumI
   const denT = n * sumT2 - sumT * sumT

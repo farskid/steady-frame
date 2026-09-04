@@ -15,11 +15,11 @@ export const WORK_W = 480
 const MISS_LIMIT = 6
 const MIN_LOCK = 8
 const EXPAND_BELOW = 12
-const REPLENISH_BELOW = 40
+const REPLENISH_BELOW = 28
 const REPLENISH_INLIERS = 15
 const REFRESH_INLIERS = 25
 const REFRESH_GAP = 10
-const ROI_FRAC = 0.11
+const NCC_CONFIRM = 0.38
 
 export type TrackVia = 'klt' | 'pred' | 'ncc' | 'face' | 'patch' | 'color'
 
@@ -106,7 +106,7 @@ export class SubjectTracker {
 
     const wx = x / this.sx
     const wy = y / this.sy
-    const srcRoi = ROI_FRAC * Math.max(srcW, srcH)
+    const srcRoi = 0.125 * Math.min(srcW, srcH)
     this.roiWork = srcRoi / this.sx
     this.lockRoiWork = this.roiWork
 
@@ -206,17 +206,20 @@ export class SubjectTracker {
         this.status,
         this.err,
       )
+      this.rejectAgainstPrior(n, dCx, dCy)
       const sim = this.ransac.estimate(this.pts, this.nextPts, this.status, n)
       if (!sim) {
         this.miss()
-        this.keepTrackedOrCoast(n, dCx, dCy)
+        this.coastFeatures(n, dCx, dCy)
+        this.snapCenter()
       } else {
         const meas = applySimilarity(sim, prevCx, prevCy)
+        const appear = this.ncc.scoreAt(this.curPyr.levels[0], meas.x, meas.y)
         const r = measurementR(sim.rms, sim.inlierCount)
-        const accepted = this.kf.update(meas.x, meas.y, r)
+        const accepted = appear >= NCC_CONFIRM && this.kf.update(meas.x, meas.y, r)
         if (!accepted) {
           this.miss()
-          this.keepTrackedOrCoast(n, dCx, dCy)
+          this.coastFeatures(n, dCx, dCy)
         } else {
           this.misses = 0
           this.lost = false
@@ -230,6 +233,7 @@ export class SubjectTracker {
           via = 'klt'
           visual = true
           this.compactInliers(n, sim.inliers)
+          this.snapCenter()
           if (
             this.featCount < REPLENISH_BELOW &&
             this.misses === 0 &&
@@ -239,12 +243,16 @@ export class SubjectTracker {
               this.curPyr.levels[0],
               this.pts,
               this.featCount,
-              { cx: this.kf.x, cy: this.kf.y, radius: this.roiWork },
+              { cx: this.kf.x, cy: this.kf.y, radius: this.roiWork * 0.82 },
               MAX_FEATURES,
             )
           }
           this.framesSinceRefresh += 1
-          if (inlierCount >= REFRESH_INLIERS && this.framesSinceRefresh >= REFRESH_GAP) {
+          if (
+            inlierCount >= REFRESH_INLIERS &&
+            this.framesSinceRefresh >= REFRESH_GAP &&
+            appear >= 0.7
+          ) {
             this.ncc.capture(this.curPyr.levels[0], this.kf.x, this.kf.y)
             this.framesSinceRefresh = 0
           }
@@ -268,26 +276,50 @@ export class SubjectTracker {
     return this.result(visual, via)
   }
 
+  private rejectAgainstPrior(n: number, dCx: number, dCy: number): void {
+    const expected = Math.hypot(dCx, dCy)
+    if (expected < 1.5) return
+    const tol = Math.max(8, expected + 6)
+    const tol2 = tol * tol
+    for (let i = 0; i < n; i++) {
+      if (!this.status[i]) continue
+      const fx = this.nextPts[i * 2] - this.pts[i * 2] - dCx
+      const fy = this.nextPts[i * 2 + 1] - this.pts[i * 2 + 1] - dCy
+      if (fx * fx + fy * fy > tol2) this.status[i] = 0
+    }
+  }
+
+  private snapCenter(): number {
+    const hit = this.ncc.snap(this.curPyr.levels[0], this.kf.x, this.kf.y, 12)
+    if (!hit || hit.ncc < NCC_CONFIRM) return hit?.ncc ?? -1
+    this.kf.x += (hit.x - this.kf.x) * 0.7
+    this.kf.y += (hit.y - this.kf.y) * 0.7
+    return hit.ncc
+  }
+
   private miss(): void {
     this.misses += 1
+    const appear = this.snapCenter()
+    if (appear >= NCC_CONFIRM) {
+      this.misses = Math.min(this.misses, MISS_LIMIT - 1)
+      this.lost = false
+      if (this.featCount < MIN_LOCK) {
+        this.featCount = this.features.detect(
+          this.curPyr.levels[0],
+          { cx: this.kf.x, cy: this.kf.y, radius: this.roiWork },
+          this.pts,
+          MAX_FEATURES,
+        )
+      }
+      return
+    }
     if (this.misses >= MISS_LIMIT) {
       this.lost = true
       this.lostFrames += 1
     }
   }
 
-  private keepTrackedOrCoast(n: number, dCx: number, dCy: number): void {
-    let k = 0
-    for (let i = 0; i < n; i++) {
-      if (!this.status[i]) continue
-      this.pts[k * 2] = this.nextPts[i * 2]
-      this.pts[k * 2 + 1] = this.nextPts[i * 2 + 1]
-      k += 1
-    }
-    if (k > 0) {
-      this.featCount = k
-      return
-    }
+  private coastFeatures(n: number, dCx: number, dCy: number): void {
     for (let i = 0; i < n; i++) {
       this.pts[i * 2] += dCx
       this.pts[i * 2 + 1] += dCy
@@ -295,11 +327,19 @@ export class SubjectTracker {
   }
 
   private compactInliers(n: number, inliers: Uint8Array): void {
+    const cx = this.kf.x
+    const cy = this.kf.y
+    const r2 = this.roiWork * this.roiWork
     let k = 0
     for (let i = 0; i < n; i++) {
       if (!inliers[i]) continue
-      this.pts[k * 2] = this.nextPts[i * 2]
-      this.pts[k * 2 + 1] = this.nextPts[i * 2 + 1]
+      const x = this.nextPts[i * 2]
+      const y = this.nextPts[i * 2 + 1]
+      const dx = x - cx
+      const dy = y - cy
+      if (dx * dx + dy * dy > r2) continue
+      this.pts[k * 2] = x
+      this.pts[k * 2 + 1] = y
       k += 1
     }
     this.featCount = k

@@ -5,8 +5,8 @@ import { PYRAMID_LEVELS, type Level, type Pyramid } from './pyramid.ts'
 export const WIN_SIZE = 11
 export const MAX_ITERS = 20
 export const EPS = 0.01
-export const FB_THRESH = 1.0
-export const MAX_RESIDUAL = 28
+export const FB_THRESH = 2.0
+export const MAX_RESIDUAL = 36
 export const MIN_EIG = 1e-4
 
 const HALF = (WIN_SIZE - 1) >> 1
@@ -230,6 +230,8 @@ export class KltTracker {
         break
       }
     }
+    // Accept a near-converged step if the residual is already good.
+    if (!converged && lastErr <= MAX_RESIDUAL * 0.45) converged = true
     hit.x = cx
     hit.y = cy
     hit.err = lastErr

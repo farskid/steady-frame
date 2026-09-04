@@ -2,7 +2,7 @@
 
 const CHI2_95_DF2 = 9.21
 const SCALE_ALPHA = 0.4
-const Q_JERK = 400
+const Q_JERK = 2400
 
 export class KalmanCV {
   x = 0
