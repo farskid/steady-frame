@@ -224,10 +224,7 @@ export class SubjectTracker {
         this.miss()
         this.keepTrackedFeatures(n)
       } else {
-        const shift = this.inlierShift(n, sim.inliers)
-        const meas = shift
-          ? { x: prevCx + shift.x, y: prevCy + shift.y }
-          : applySimilarity(sim, prevCx, prevCy)
+        const meas = this.mapCenter(n, sim.inliers, prevCx, prevCy, sim)
         const jumpPred = Math.hypot(dCx, dCy)
         const jumpMeas = Math.hypot(meas.x - prevCx, meas.y - prevCy)
         const backgroundMotion = jumpPred > 4 && jumpMeas < jumpPred * 0.4
@@ -244,7 +241,8 @@ export class SubjectTracker {
             this.misses = 0
             this.lost = false
             this.lostFrames = 0
-            this.rotation += sim.theta
+            if (Math.abs(sim.theta) > 0.008) this.rotation += sim.theta
+            else this.rotation *= 0.98
             if (Math.abs(sim.s - 1) > 0.015) {
               this.rawScale *= sim.s
               this.roiWork = clamp(this.roiWork * sim.s, this.lockRoiWork * 0.5, this.lockRoiWork * 2)
@@ -382,8 +380,17 @@ export class SubjectTracker {
     if (k >= MIN_LOCK) this.featCount = k
   }
 
-  /** Translation of the inlier cloud — ignores a noisy RANSAC θ about the origin. */
-  private inlierShift(n: number, inliers: Uint8Array): { x: number; y: number } | null {
+  /**
+   * Move the lock point with the inlier cloud: translate by the centroid
+   * and rotate/scale the lock-to-centroid offset (so roll does not walk the pin).
+   */
+  private mapCenter(
+    n: number,
+    inliers: Uint8Array,
+    prevCx: number,
+    prevCy: number,
+    sim: { s: number; theta: number; tx: number; ty: number },
+  ): { x: number; y: number } {
     let psx = 0
     let psy = 0
     let nsx = 0
@@ -397,9 +404,22 @@ export class SubjectTracker {
       nsy += this.nextPts[i * 2 + 1]
       c += 1
     }
-    if (c < 4) return null
+    if (c < 4) return applySimilarity(sim, prevCx, prevCy)
     const inv = 1 / c
-    return { x: (nsx - psx) * inv, y: (nsy - psy) * inv }
+    const c0x = psx * inv
+    const c0y = psy * inv
+    const c1x = nsx * inv
+    const c1y = nsy * inv
+    const dx = prevCx - c0x
+    const dy = prevCy - c0y
+    const th = Math.abs(sim.theta) > 0.008 ? sim.theta : 0
+    const sc = Math.abs(sim.s - 1) > 0.015 ? sim.s : 1
+    const cs = Math.cos(th)
+    const sn = Math.sin(th)
+    return {
+      x: c1x + sc * (cs * dx - sn * dy),
+      y: c1y + sc * (sn * dx + cs * dy),
+    }
   }
 
   private inlierCentroidFar(n: number, inliers: Uint8Array): boolean {
