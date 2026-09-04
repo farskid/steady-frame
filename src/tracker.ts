@@ -241,8 +241,6 @@ export class SubjectTracker {
             this.misses = 0
             this.lost = false
             this.lostFrames = 0
-            this.kf.x = meas.x
-            this.kf.y = meas.y
             if (Math.abs(sim.theta) > 0.008) this.rotation += sim.theta
             else this.rotation *= 0.98
             if (Math.abs(sim.s - 1) > 0.015) {
