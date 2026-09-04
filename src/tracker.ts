@@ -272,6 +272,19 @@ export class SubjectTracker {
             }
             this.framesSinceRefresh += 1
             if (inlierCount >= REFRESH_INLIERS && this.framesSinceRefresh >= REFRESH_GAP) {
+              const d = this.nccDelta()
+              const hit = this.ncc.snap(
+                this.curPyr.levels[0],
+                this.kf.x,
+                this.kf.y,
+                8,
+                d.theta,
+                d.scale,
+              )
+              if (hit && hit.ncc >= 0.7) {
+                this.kf.x += (hit.x - this.kf.x) * 0.4
+                this.kf.y += (hit.y - this.kf.y) * 0.4
+              }
               this.ncc.capture(this.curPyr.levels[0], this.kf.x, this.kf.y)
               this.nccPoseTheta = this.rotation
               this.nccPoseScale = this.scale
@@ -393,23 +406,29 @@ export class SubjectTracker {
   ): { x: number; y: number } {
     let psx = 0
     let psy = 0
-    let nsx = 0
-    let nsy = 0
     let c = 0
     for (let i = 0; i < n; i++) {
       if (!inliers[i]) continue
       psx += this.pts[i * 2]
       psy += this.pts[i * 2 + 1]
-      nsx += this.nextPts[i * 2]
-      nsy += this.nextPts[i * 2 + 1]
       c += 1
     }
     if (c < 4) return applySimilarity(sim, prevCx, prevCy)
     const inv = 1 / c
     const c0x = psx * inv
     const c0y = psy * inv
-    const c1x = nsx * inv
-    const c1y = nsy * inv
+    const dxs: number[] = []
+    const dys: number[] = []
+    for (let i = 0; i < n; i++) {
+      if (!inliers[i]) continue
+      dxs.push(this.nextPts[i * 2] - this.pts[i * 2])
+      dys.push(this.nextPts[i * 2 + 1] - this.pts[i * 2 + 1])
+    }
+    dxs.sort((a, b) => a - b)
+    dys.sort((a, b) => a - b)
+    const mid = dxs.length >> 1
+    const mdx = dxs.length % 2 ? dxs[mid] : 0.5 * (dxs[mid - 1] + dxs[mid])
+    const mdy = dys.length % 2 ? dys[mid] : 0.5 * (dys[mid - 1] + dys[mid])
     const dx = prevCx - c0x
     const dy = prevCy - c0y
     const th = Math.abs(sim.theta) > 0.008 ? sim.theta : 0
@@ -417,8 +436,8 @@ export class SubjectTracker {
     const cs = Math.cos(th)
     const sn = Math.sin(th)
     return {
-      x: c1x + sc * (cs * dx - sn * dy),
-      y: c1y + sc * (sn * dx + cs * dy),
+      x: prevCx + mdx + sc * (cs * dx - sn * dy) - dx,
+      y: prevCy + mdy + sc * (sn * dx + cs * dy) - dy,
     }
   }
 
