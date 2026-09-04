@@ -272,22 +272,11 @@ export class SubjectTracker {
             }
             this.framesSinceRefresh += 1
             if (inlierCount >= REFRESH_INLIERS && this.framesSinceRefresh >= REFRESH_GAP) {
-              const d = this.nccDelta()
-              const here = this.ncc.scoreAt(
-                this.curPyr.levels[0],
-                this.kf.x,
-                this.kf.y,
-                d.theta,
-                d.scale,
-              )
-              if (here >= 0.6) {
-                this.ncc.capture(this.curPyr.levels[0], this.kf.x, this.kf.y)
-                this.nccPoseTheta = this.rotation
-                this.nccPoseScale = this.scale
-                this.framesSinceRefresh = 0
-              }
+              this.ncc.capture(this.curPyr.levels[0], this.kf.x, this.kf.y)
+              this.nccPoseTheta = this.rotation
+              this.nccPoseScale = this.scale
+              this.framesSinceRefresh = 0
             }
-            this.recentreIfWalked()
           }
         }
       }
@@ -329,21 +318,6 @@ export class SubjectTracker {
     this.kf.x += (hit.x - this.kf.x) * 0.3
     this.kf.y += (hit.y - this.kf.y) * 0.3
     return hit.ncc
-  }
-
-  /**
-   * If KLT has walked off the lock patch, pull toward a better warped NCC peak.
-   * Skipped when appearance at kf is already good — not a per-frame snap.
-   */
-  private recentreIfWalked(): void {
-    const d = this.nccDelta()
-    const level = this.curPyr.levels[0]
-    const here = this.ncc.scoreAt(level, this.kf.x, this.kf.y, d.theta, d.scale)
-    if (here < 0 || here >= 0.55) return
-    const hit = this.ncc.snap(level, this.kf.x, this.kf.y, 10, d.theta, d.scale)
-    if (!hit || hit.ncc < here + 0.12 || hit.ncc < 0.62) return
-    this.kf.x += (hit.x - this.kf.x) * 0.4
-    this.kf.y += (hit.y - this.kf.y) * 0.4
   }
 
   private miss(): void {
