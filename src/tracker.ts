@@ -12,12 +12,12 @@ import { Pyramid } from './vision/pyramid.ts'
 import { applySimilarity, SimilarityRansac } from './vision/ransac.ts'
 
 export const WORK_W = 480
-const MISS_LIMIT = 6
+const MISS_LIMIT = 12
 const MIN_LOCK = 8
 const EXPAND_BELOW = 20
 const REPLENISH_BELOW = 28
-const REPLENISH_INLIERS = 15
-const REFRESH_INLIERS = 20
+const REPLENISH_INLIERS = 8
+const REFRESH_INLIERS = 8
 const REFRESH_GAP = 6
 const SNAP_NCC = 0.6
 const MIN_ACCEPT_INLIERS = 8
@@ -238,10 +238,12 @@ export class SubjectTracker {
             this.lost = false
             this.lostFrames = 0
             this.rotation += sim.theta
-            if (Math.abs(sim.s - 1) > 0.015) this.rawScale *= sim.s
+            if (Math.abs(sim.s - 1) > 0.015) {
+              this.rawScale *= sim.s
+              this.roiWork = clamp(this.roiWork * sim.s, this.lockRoiWork * 0.5, this.lockRoiWork * 2)
+            }
             this.rawScale = clamp(this.rawScale, 0.5, 2)
             this.scale = this.scaleSm.observe(this.rawScale)
-            this.roiWork = clamp(this.roiWork * sim.s, this.lockRoiWork * 0.5, this.lockRoiWork * 2)
             inlierCount = sim.inlierCount
             via = 'klt'
             visual = true
