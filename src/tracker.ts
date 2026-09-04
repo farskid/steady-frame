@@ -294,6 +294,9 @@ export class SubjectTracker {
   }
 
   private snapCenter(): number {
+    const speed = Math.hypot(this.kf.vx, this.kf.vy)
+    // Whip peaks ~350 work-px/s; a rotation-broken NCC peak must not walk the pin.
+    if (speed > 80) return -1
     const d = this.nccDelta()
     const hit = this.ncc.snap(this.curPyr.levels[0], this.kf.x, this.kf.y, 12, d.theta, d.scale)
     if (!hit || hit.ncc < SNAP_NCC) return hit?.ncc ?? -1
