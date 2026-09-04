@@ -19,7 +19,7 @@ const REPLENISH_BELOW = 28
 const REPLENISH_INLIERS = 15
 const REFRESH_INLIERS = 20
 const REFRESH_GAP = 6
-const NCC_CONFIRM = 0.38
+const SNAP_NCC = 0.6
 const MIN_ACCEPT_INLIERS = 8
 
 export type TrackVia = 'klt' | 'pred' | 'ncc' | 'face' | 'patch' | 'color'
@@ -216,7 +216,6 @@ export class SubjectTracker {
       if (!sim || sim.inlierCount < MIN_ACCEPT_INLIERS) {
         this.miss()
         this.coastFeatures(n, dCx, dCy)
-        this.snapCenter()
       } else {
         const meas = applySimilarity(sim, prevCx, prevCy)
         const r = measurementR(sim.rms, sim.inlierCount)
@@ -237,7 +236,6 @@ export class SubjectTracker {
           via = 'klt'
           visual = true
           this.compactInliers(n, sim.inliers)
-          this.snapCenter()
           if (
             this.featCount < REPLENISH_BELOW &&
             this.misses === 0 &&
@@ -299,16 +297,16 @@ export class SubjectTracker {
   private snapCenter(): number {
     const d = this.nccDelta()
     const hit = this.ncc.snap(this.curPyr.levels[0], this.kf.x, this.kf.y, 12, d.theta, d.scale)
-    if (!hit || hit.ncc < NCC_CONFIRM) return hit?.ncc ?? -1
-    this.kf.x += (hit.x - this.kf.x) * 0.7
-    this.kf.y += (hit.y - this.kf.y) * 0.7
+    if (!hit || hit.ncc < SNAP_NCC) return hit?.ncc ?? -1
+    this.kf.x += (hit.x - this.kf.x) * 0.3
+    this.kf.y += (hit.y - this.kf.y) * 0.3
     return hit.ncc
   }
 
   private miss(): void {
     this.misses += 1
     const appear = this.snapCenter()
-    if (appear >= NCC_CONFIRM) {
+    if (appear >= SNAP_NCC) {
       this.misses = Math.min(this.misses, MISS_LIMIT - 1)
       this.lost = false
       if (this.featCount < MIN_LOCK) {
