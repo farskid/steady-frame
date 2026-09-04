@@ -59,32 +59,54 @@ export function drawTestScene(
   ctx.stroke()
 
   // High-contrast lock target — distinct from the HUD reticle.
+  // Size scales with the frame so downscale-to-480 still has Shi-Tomasi corners.
+  const R = Math.max(56, Math.min(width, height) * 0.1)
   ctx.translate(cx + subject.x, cy + subject.y)
   ctx.fillStyle = '#f4f7fb'
   ctx.beginPath()
-  ctx.arc(0, 0, 48, 0, Math.PI * 2)
+  ctx.arc(0, 0, R, 0, Math.PI * 2)
   ctx.fill()
   ctx.fillStyle = '#e85d4c'
   ctx.beginPath()
-  ctx.arc(0, 0, 34, 0, Math.PI * 2)
+  ctx.arc(0, 0, R * 0.7, 0, Math.PI * 2)
   ctx.fill()
   ctx.fillStyle = '#f4f7fb'
   ctx.beginPath()
-  ctx.arc(0, 0, 18, 0, Math.PI * 2)
+  ctx.arc(0, 0, R * 0.38, 0, Math.PI * 2)
   ctx.fill()
   ctx.fillStyle = '#14161c'
   ctx.beginPath()
-  ctx.arc(0, 0, 7, 0, Math.PI * 2)
+  ctx.arc(0, 0, R * 0.14, 0, Math.PI * 2)
   ctx.fill()
+
+  // Irregular interior marks — concentric rings alone are corner-poor.
+  const marks: [number, number, number][] = [
+    [-0.46, -0.22, 0.16],
+    [0.38, -0.4, 0.14],
+    [-0.18, 0.42, 0.15],
+    [0.44, 0.28, 0.13],
+    [-0.4, 0.18, 0.12],
+    [0.2, -0.08, 0.11],
+    [0.06, 0.5, 0.12],
+    [-0.28, -0.48, 0.13],
+  ]
+  for (const [mx, my, ms] of marks) {
+    const s = R * ms
+    ctx.fillStyle = '#14161c'
+    ctx.fillRect(mx * R - s / 2, my * R - s / 2, s, s)
+    ctx.fillStyle = '#f4f7fb'
+    ctx.fillRect(mx * R - s / 4, my * R - s / 4, s / 2, s / 2)
+  }
+
   ctx.strokeStyle = `rgba(244, 247, 251, ${0.4 + Math.sin(time * 3) * 0.2})`
-  ctx.lineWidth = 2
+  ctx.lineWidth = Math.max(2, R * 0.04)
   ctx.beginPath()
-  ctx.arc(0, 0, 56, 0, Math.PI * 2)
+  ctx.arc(0, 0, R * 1.16, 0, Math.PI * 2)
   ctx.stroke()
   ctx.fillStyle = '#f4f7fb'
-  ctx.font = '700 13px ui-sans-serif, system-ui, sans-serif'
+  ctx.font = `700 ${Math.round(R * 0.28)}px ui-sans-serif, system-ui, sans-serif`
   ctx.textAlign = 'center'
-  ctx.fillText('SUBJECT', 0, 68)
+  ctx.fillText('SUBJECT', 0, R * 1.42)
 
   ctx.restore()
 }

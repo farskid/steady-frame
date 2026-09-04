@@ -142,9 +142,14 @@ function subjectOffset(now: number): { x: number; y: number } {
     env = 1 - u * u
   }
   // Starts at 0,0 so the tracker can follow instead of teleporting.
+  // Peak |dx/dt| = 0.72 of frame width/s (sin ωt, ωA = 0.72), with reversals.
+  const ax = source.width * 0.3
+  const ay = source.height * 0.22
+  const omx = 0.72 / 0.3
+  const omy = omx * 0.82
   return {
-    x: Math.sin(t * 5.4) * source.width * 0.32 * env,
-    y: Math.sin(t * 4.1) * source.height * 0.22 * env,
+    x: Math.sin(t * omx) * ax * env,
+    y: Math.sin(t * omy + 0.55) * ay * env,
   }
 }
 
