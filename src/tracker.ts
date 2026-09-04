@@ -211,10 +211,11 @@ export class SubjectTracker {
         this.status,
         this.err,
       )
+      this.dropStaticTracks(n, dCx, dCy)
       const sim = this.ransac.estimate(this.pts, this.nextPts, this.status, n)
       if (!sim || sim.inlierCount < MIN_ACCEPT_INLIERS) {
         this.miss()
-        this.coastFeatures(n, dCx, dCy)
+        this.keepTrackedFeatures(n, dCx, dCy)
       } else {
         const meas = applySimilarity(sim, prevCx, prevCy)
         const jumpPred = Math.hypot(dCx, dCy)
@@ -222,13 +223,13 @@ export class SubjectTracker {
         const backgroundMotion = jumpPred > 4 && jumpMeas < jumpPred * 0.4
         if (backgroundMotion || this.inlierCentroidFar(n, sim.inliers)) {
           this.miss()
-          this.coastFeatures(n, dCx, dCy)
+          this.keepTrackedFeatures(n, dCx, dCy)
         } else {
           const r = measurementR(sim.rms, sim.inlierCount)
           const accepted = this.kf.update(meas.x, meas.y, r)
           if (!accepted) {
             this.miss()
-            this.coastFeatures(n, dCx, dCy)
+            this.keepTrackedFeatures(n, dCx, dCy)
           } else {
             this.misses = 0
             this.lost = false
@@ -325,6 +326,45 @@ export class SubjectTracker {
       this.lost = true
       this.lostFrames += 1
     }
+  }
+
+  /** Drop motionless tracks when a moving cluster is large enough to fit. */
+  private dropStaticTracks(n: number, dCx: number, dCy: number): void {
+    const expected = Math.hypot(dCx, dCy)
+    const thresh = Math.max(2.5, expected * 0.35)
+    let moving = 0
+    let still = 0
+    for (let i = 0; i < n; i++) {
+      if (!this.status[i]) continue
+      const f = Math.hypot(
+        this.nextPts[i * 2] - this.pts[i * 2],
+        this.nextPts[i * 2 + 1] - this.pts[i * 2 + 1],
+      )
+      if (f < thresh) still += 1
+      else moving += 1
+    }
+    if (moving < MIN_ACCEPT_INLIERS || still < 4) return
+    for (let i = 0; i < n; i++) {
+      if (!this.status[i]) continue
+      const f = Math.hypot(
+        this.nextPts[i * 2] - this.pts[i * 2],
+        this.nextPts[i * 2 + 1] - this.pts[i * 2 + 1],
+      )
+      if (f < thresh) this.status[i] = 0
+    }
+  }
+
+  /** Keep surviving KLT points instead of teleporting them with a wrong prior. */
+  private keepTrackedFeatures(n: number, dCx: number, dCy: number): void {
+    let k = 0
+    for (let i = 0; i < n; i++) {
+      if (!this.status[i]) continue
+      this.pts[k * 2] = this.nextPts[i * 2]
+      this.pts[k * 2 + 1] = this.nextPts[i * 2 + 1]
+      k += 1
+    }
+    if (k >= MIN_LOCK) this.featCount = k
+    else this.coastFeatures(n, dCx, dCy)
   }
 
   private inlierCentroidFar(n: number, inliers: Uint8Array): boolean {
