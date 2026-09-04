@@ -211,7 +211,6 @@ export class SubjectTracker {
         this.status,
         this.err,
       )
-      this.rejectAgainstPrior(n, dCx, dCy)
       const sim = this.ransac.estimate(this.pts, this.nextPts, this.status, n)
       if (!sim || sim.inlierCount < MIN_ACCEPT_INLIERS) {
         this.miss()
@@ -274,19 +273,6 @@ export class SubjectTracker {
 
     this.lastMs = performance.now() - t0
     return this.result(visual, via)
-  }
-
-  private rejectAgainstPrior(n: number, dCx: number, dCy: number): void {
-    const expected = Math.hypot(dCx, dCy)
-    if (expected < 1.5) return
-    const tol = Math.max(8, expected + 6)
-    const tol2 = tol * tol
-    for (let i = 0; i < n; i++) {
-      if (!this.status[i]) continue
-      const fx = this.nextPts[i * 2] - this.pts[i * 2] - dCx
-      const fy = this.nextPts[i * 2 + 1] - this.pts[i * 2 + 1] - dCy
-      if (fx * fx + fy * fy > tol2) this.status[i] = 0
-    }
   }
 
   private nccDelta(): { theta: number; scale: number } {
