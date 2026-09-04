@@ -4,6 +4,9 @@ import type { MotionState } from './motion.ts'
 /** Heavy crop so a moving subject can be panned back onto the reticle. */
 export const CROP_ZOOM = 2.2
 
+/** Cancel the subject's in-plane rotation (RANSAC θ) in the view. */
+export const CANCEL_ROLL = true
+
 const HFOV = (65 * Math.PI) / 180
 
 export function cropOnly(width: number, height: number): Mat3 {

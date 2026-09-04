@@ -2,7 +2,7 @@ import './style.css'
 import { CameraFeed, drawCover } from './camera.ts'
 import { MotionTracker } from './motion.ts'
 import { drawTestScene } from './scene.ts'
-import { cropOnly, lockViewMatrix, sceneCameraMatrix } from './stabilize.ts'
+import { cropOnly, imageShiftFromImu, lockViewMatrix, sceneCameraMatrix, CANCEL_ROLL } from './stabilize.ts'
 import { SubjectTracker } from './tracker.ts'
 
 const app = document.querySelector<HTMLDivElement>('#app')!
@@ -90,6 +90,9 @@ let pointerActive = false
 let pointerGyro = { x: 0, y: 0, z: 0 }
 let lastFrame = performance.now() / 1000
 let hudTick = 0
+let lastImuX = 0
+let lastImuY = 0
+let lockHint = ''
 let lastTrack = {
   foundX: 0,
   foundY: 0,
@@ -98,7 +101,11 @@ let lastTrack = {
   lost: false,
   clamped: false,
   visual: true,
-  via: 'patch' as 'face' | 'patch' | 'color',
+  via: 'klt' as 'klt' | 'pred' | 'ncc' | 'face' | 'patch' | 'color',
+  rotation: 0,
+  scale: 1,
+  features: 0,
+  lastMs: 0,
 }
 
 function resize(): void {
@@ -231,6 +238,7 @@ function refreshChrome(): void {
 
   if (!locked) {
     coachEl.textContent =
+      lockHint ||
       'Front camera on. Put your face on the reticle, tap Lock, then move your head. It should stay glued.'
     statusEl.textContent = camera.ready
       ? 'Hard pin: the patch (or face) under the reticle is translated back to center every frame.'
@@ -248,7 +256,9 @@ function refreshChrome(): void {
       'Pinned to the reticle. Move your head. You should not be able to walk off-center until you leave the camera.'
   }
   const how = lastTrack.via
-  statusEl.textContent = `${how} ${Math.round(lastTrack.score * 100)}% · pin is unclamped`
+  const pts = lastTrack.features
+  const ms = lastTrack.lastMs
+  statusEl.textContent = `${how} · ${pts} pts · ${Math.round(lastTrack.score * 100)}% · ${ms.toFixed(1)} ms`
 }
 
 function lockSubject(): void {
@@ -257,7 +267,17 @@ function lockSubject(): void {
   motion.reset()
   motion.mode = 'lock'
   pointerGyro = { x: 0, y: 0, z: 0 }
-  tracker.lock(source, source.width, source.height, source.width / 2, source.height / 2)
+  const imu0 = imageShiftFromImu(motion.state, source.width, source.height)
+  lastImuX = imu0.x
+  lastImuY = imu0.y
+  const ok = tracker.lock(source, source.width, source.height, source.width / 2, source.height / 2)
+  if (!ok) {
+    lockHint =
+      'Not enough texture — put your face or a contrasty object on the reticle.'
+    refreshChrome()
+    return
+  }
+  lockHint = ''
   locked = true
   lastTrack = {
     foundX: source.width / 2,
@@ -267,7 +287,11 @@ function lockSubject(): void {
     lost: false,
     clamped: false,
     visual: true,
-    via: 'patch',
+    via: 'klt',
+    rotation: 0,
+    scale: 1,
+    features: tracker.featureCount,
+    lastMs: tracker.lastMs,
   }
   refreshChrome()
 }
@@ -300,17 +324,18 @@ function frame(rawNow: number): void {
   let mat = cropOnly(width, height)
 
   if (locked) {
-    const track = tracker.update(source, width, height)
-    const sizeScale =
-      track.via === 'face' && track.foundSize > 1
-        ? tracker.lockSize / track.foundSize
-        : 1
+    const imu = imageShiftFromImu(motion.state, width, height)
+    const priorShift = { x: imu.x - lastImuX, y: imu.y - lastImuY }
+    lastImuX = imu.x
+    lastImuY = imu.y
+    const track = tracker.update(source, width, height, priorShift)
+    const sizeScale = track.scale > 1e-6 ? 1 / track.scale : 1
     const view = lockViewMatrix(
       width,
       height,
       track.foundX,
       track.foundY,
-      0,
+      CANCEL_ROLL ? track.rotation : 0,
       sizeScale,
     )
     mat = view.matrix

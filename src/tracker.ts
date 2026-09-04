@@ -1,16 +1,27 @@
 /**
- * Hard pin tracker: color mean-shift (follows a head that turns) +
- * whole-frame template search. FaceDetector only snaps when it agrees —
- * stale face boxes are what let a fast head “escape”.
+ * Hard-pin tracker: pyramidal KLT + RANSAC similarity + Kalman.
+ * Inverse affine in the view (stabilize.ts) glues the filtered center to the reticle.
  */
 
-const WORK_W = 160
-const COARSE_PATCH = 12
-const FINE_PATCH = 24
-const FINE_SEARCH = 22
-const H_BINS = 16
-const S_BINS = 8
-const MISS_LIMIT = 24
+import { clamp } from './mat3.ts'
+import { FeatureDetector, MAX_FEATURES } from './vision/features.ts'
+import { KalmanCV, measurementR, ScaleSmoother } from './vision/kalman.ts'
+import { KltTracker } from './vision/klt.ts'
+import { NccMatcher, NCC_ACCEPT } from './vision/ncc.ts'
+import { Pyramid } from './vision/pyramid.ts'
+import { applySimilarity, SimilarityRansac } from './vision/ransac.ts'
+
+export const WORK_W = 480
+const MISS_LIMIT = 6
+const MIN_LOCK = 8
+const EXPAND_BELOW = 12
+const REPLENISH_BELOW = 40
+const REPLENISH_INLIERS = 15
+const REFRESH_INLIERS = 25
+const REFRESH_GAP = 10
+const ROI_FRAC = 0.11
+
+export type TrackVia = 'klt' | 'pred' | 'ncc' | 'face' | 'patch' | 'color'
 
 export type TrackResult = {
   foundX: number
@@ -19,7 +30,11 @@ export type TrackResult = {
   score: number
   lost: boolean
   visual: boolean
-  via: 'face' | 'patch' | 'color'
+  via: TrackVia
+  rotation: number
+  scale: number
+  features: number
+  lastMs: number
 }
 
 type FaceBox = { cx: number; cy: number; size: number }
@@ -36,176 +51,311 @@ export class SubjectTracker {
   foundSize = 0
   lockSize = 1
   score = 1
+  lastMs = 0
+  rotation = 0
+  scale = 1
+
+  get featureCount(): number {
+    return this.featCount
+  }
 
   private readonly work = document.createElement('canvas')
   private readonly workCtx: CanvasRenderingContext2D
-  private readonly fine = document.createElement('canvas')
-  private readonly fineCtx: CanvasRenderingContext2D
-  private coarse: Uint8Array | null = null
-  private fineT: Uint8Array | null = null
-  private hist = new Float32Array(H_BINS * S_BINS)
+  private prevPyr = new Pyramid()
+  private curPyr = new Pyramid()
+  private readonly features = new FeatureDetector()
+  private readonly klt = new KltTracker()
+  private readonly ransac = new SimilarityRansac()
+  private readonly kf = new KalmanCV()
+  private readonly scaleSm = new ScaleSmoother()
+  private readonly ncc = new NccMatcher()
+
+  private readonly pts = new Float32Array(MAX_FEATURES * 2)
+  private readonly guesses = new Float32Array(MAX_FEATURES * 2)
+  private readonly nextPts = new Float32Array(MAX_FEATURES * 2)
+  private readonly status = new Uint8Array(MAX_FEATURES)
+  private readonly err = new Float32Array(MAX_FEATURES)
+  private featCount = 0
+
+  private sx = 1
+  private sy = 1
+  private centerWorkX = 0
+  private centerWorkY = 0
+  private roiWork = 40
+  private lockRoiWork = 40
+  private rawScale = 1
   private misses = 0
+  private lostFrames = 0
+  private framesSinceRefresh = 0
+  private lastT = 0
+
   private faces: FaceBox[] = []
   private detecting = false
   private readonly detector: FaceDetectorLike | null
-  private srcW = 1
-  private srcH = 1
-  private vx = 0
-  private vy = 0
 
   constructor() {
     const wctx = this.work.getContext('2d', { willReadFrequently: true })
-    const fctx = this.fine.getContext('2d', { willReadFrequently: true })
-    if (!wctx || !fctx) throw new Error('2D canvas unavailable')
+    if (!wctx) throw new Error('2D canvas unavailable')
     this.workCtx = wctx
-    this.fineCtx = fctx
     this.detector = createFaceDetector()
   }
 
   lock(source: CanvasImageSource, srcW: number, srcH: number, x: number, y: number): boolean {
-    this.srcW = srcW
-    this.srcH = srcH
-    this.foundX = clamp(x, 8, srcW - 8)
-    this.foundY = clamp(y, 8, srcH - 8)
-    this.vx = 0
-    this.vy = 0
-    this.downscale(source, srcW, srcH)
-    const pixels = this.workCtx.getImageData(0, 0, this.work.width, this.work.height).data
-    const sx = this.work.width / srcW
-    const sy = this.work.height / srcH
-    const wx = this.foundX * sx
-    const wy = this.foundY * sy
-    this.hist.set(colorHist(pixels, this.work.width, this.work.height, wx, wy, 14))
-    const gray = rgbaToGray(pixels, this.work.width, this.work.height)
-    const cx = clampInt(Math.round(wx), COARSE_PATCH, this.work.width - COARSE_PATCH - 1)
-    const cy = clampInt(Math.round(wy), COARSE_PATCH, this.work.height - COARSE_PATCH - 1)
-    this.coarse = extractPatch(gray, this.work.width, cx, cy, COARSE_PATCH)
-    blit(this.fineCtx, source, this.foundX, this.foundY, FINE_PATCH)
-    this.fineT = readGray(this.fineCtx, FINE_PATCH, FINE_PATCH)
+    this.grab(source, srcW, srcH)
+    this.prevPyr.copyFrom(this.curPyr)
+
+    const wx = x / this.sx
+    const wy = y / this.sy
+    const srcRoi = ROI_FRAC * Math.max(srcW, srcH)
+    this.roiWork = srcRoi / this.sx
+    this.lockRoiWork = this.roiWork
+
+    const level = this.curPyr.levels[0]
+    let n = this.features.detect(level, { cx: wx, cy: wy, radius: this.roiWork }, this.pts, MAX_FEATURES)
+    if (n < EXPAND_BELOW) {
+      this.roiWork *= 1.5
+      this.lockRoiWork = this.roiWork
+      n = this.features.detect(level, { cx: wx, cy: wy, radius: this.roiWork }, this.pts, MAX_FEATURES)
+    }
+    if (n < MIN_LOCK) {
+      this.locked = false
+      this.featCount = 0
+      return false
+    }
+
+    this.featCount = n
+    this.centerWorkX = wx
+    this.centerWorkY = wy
+    this.kf.reset(wx, wy)
+    this.scaleSm.reset(1)
+    this.rawScale = 1
+    this.scale = 1
+    this.rotation = 0
+    this.misses = 0
+    this.lostFrames = 0
+    this.framesSinceRefresh = 0
     this.lockSize = Math.max(srcW, srcH) * 0.22
     this.foundSize = this.lockSize
+    this.foundX = x
+    this.foundY = y
     this.locked = true
     this.lost = false
-    this.misses = 0
     this.score = 1
-    void this.pollFaces(source)
+    this.lastT = performance.now()
+    this.ncc.capture(level, wx, wy)
+    this.faces = []
     return true
   }
 
   unlock(): void {
     this.locked = false
     this.lost = false
-    this.coarse = null
-    this.fineT = null
-    this.faces = []
+    this.featCount = 0
     this.misses = 0
+    this.faces = []
   }
 
-  update(source: CanvasImageSource, srcW: number, srcH: number): TrackResult {
+  update(
+    source: CanvasImageSource,
+    srcW: number,
+    srcH: number,
+    priorShift?: { x: number; y: number },
+  ): TrackResult {
+    const t0 = performance.now()
     if (!this.locked) {
-      return {
-        foundX: srcW / 2,
-        foundY: srcH / 2,
-        foundSize: 0,
-        score: 0,
-        lost: true,
-        visual: false,
-        via: 'patch',
+      this.lastMs = performance.now() - t0
+      return this.result(false, 'pred')
+    }
+    const dt = Math.min(0.05, Math.max(0.001, (t0 - this.lastT) / 1000))
+    this.lastT = t0
+
+    this.grab(source, srcW, srcH)
+    const priorW = {
+      x: (priorShift?.x ?? 0) / this.sx,
+      y: (priorShift?.y ?? 0) / this.sy,
+    }
+
+    const prevCx = this.centerWorkX
+    const prevCy = this.centerWorkY
+    this.kf.predict(dt, priorW)
+    const dCx = this.kf.x - prevCx
+    const dCy = this.kf.y - prevCy
+
+    let via: TrackVia = 'pred'
+    let visual = false
+    let inlierCount = 0
+
+    if (this.lost) {
+      this.reacquire(source)
+      via = this.lost ? 'pred' : 'ncc'
+      visual = !this.lost
+      if (!this.lost) inlierCount = Math.max(this.featCount, REPLENISH_INLIERS)
+    } else {
+      const n = this.featCount
+      for (let i = 0; i < n; i++) {
+        this.guesses[i * 2] = this.pts[i * 2] + dCx
+        this.guesses[i * 2 + 1] = this.pts[i * 2 + 1] + dCy
+      }
+      this.klt.track(
+        this.prevPyr,
+        this.curPyr,
+        this.pts,
+        this.guesses,
+        n,
+        this.nextPts,
+        this.status,
+        this.err,
+      )
+      const sim = this.ransac.estimate(this.pts, this.nextPts, this.status, n)
+      if (!sim) {
+        this.miss()
+        this.keepTrackedOrCoast(n, dCx, dCy)
+      } else {
+        const meas = applySimilarity(sim, prevCx, prevCy)
+        const r = measurementR(sim.rms, sim.inlierCount)
+        const accepted = this.kf.update(meas.x, meas.y, r)
+        if (!accepted) {
+          this.miss()
+          this.keepTrackedOrCoast(n, dCx, dCy)
+        } else {
+          this.misses = 0
+          this.lost = false
+          this.lostFrames = 0
+          this.rotation += sim.theta
+          this.rawScale *= sim.s
+          this.rawScale = clamp(this.rawScale, 0.5, 2)
+          this.scale = this.scaleSm.observe(this.rawScale)
+          this.roiWork = clamp(this.roiWork * sim.s, this.lockRoiWork * 0.5, this.lockRoiWork * 2)
+          inlierCount = sim.inlierCount
+          via = 'klt'
+          visual = true
+          this.compactInliers(n, sim.inliers)
+          if (
+            this.featCount < REPLENISH_BELOW &&
+            this.misses === 0 &&
+            inlierCount >= REPLENISH_INLIERS
+          ) {
+            this.featCount = this.features.replenish(
+              this.curPyr.levels[0],
+              this.pts,
+              this.featCount,
+              { cx: this.kf.x, cy: this.kf.y, radius: this.roiWork },
+              MAX_FEATURES,
+            )
+          }
+          this.framesSinceRefresh += 1
+          if (inlierCount >= REFRESH_INLIERS && this.framesSinceRefresh >= REFRESH_GAP) {
+            this.ncc.capture(this.curPyr.levels[0], this.kf.x, this.kf.y)
+            this.framesSinceRefresh = 0
+          }
+        }
       }
     }
-    this.srcW = srcW
-    this.srcH = srcH
-    void this.pollFaces(source)
-    this.downscale(source, srcW, srcH)
-    const pixels = this.workCtx.getImageData(0, 0, this.work.width, this.work.height).data
-    const scaleX = srcW / this.work.width
-    const scaleY = srcH / this.work.height
 
-    const predictedX = this.foundX + this.vx
-    const predictedY = this.foundY + this.vy
-    const color = meanShift(
-      pixels,
-      this.work.width,
-      this.work.height,
-      this.hist,
-      predictedX / scaleX,
-      predictedY / scaleY,
+    this.centerWorkX = this.kf.x
+    this.centerWorkY = this.kf.y
+    this.foundX = this.centerWorkX * this.sx
+    this.foundY = this.centerWorkY * this.sy
+    this.foundSize = this.lockSize * this.scale
+    this.score = clamp((inlierCount / 30) * (1 - this.misses / MISS_LIMIT), 0, 1)
+    if (this.lost) this.score = 0
+
+    const tmp = this.prevPyr
+    this.prevPyr = this.curPyr
+    this.curPyr = tmp
+
+    this.lastMs = performance.now() - t0
+    return this.result(visual, via)
+  }
+
+  private miss(): void {
+    this.misses += 1
+    if (this.misses >= MISS_LIMIT) {
+      this.lost = true
+      this.lostFrames += 1
+    }
+  }
+
+  private keepTrackedOrCoast(n: number, dCx: number, dCy: number): void {
+    let k = 0
+    for (let i = 0; i < n; i++) {
+      if (!this.status[i]) continue
+      this.pts[k * 2] = this.nextPts[i * 2]
+      this.pts[k * 2 + 1] = this.nextPts[i * 2 + 1]
+      k += 1
+    }
+    if (k > 0) {
+      this.featCount = k
+      return
+    }
+    for (let i = 0; i < n; i++) {
+      this.pts[i * 2] += dCx
+      this.pts[i * 2 + 1] += dCy
+    }
+  }
+
+  private compactInliers(n: number, inliers: Uint8Array): void {
+    let k = 0
+    for (let i = 0; i < n; i++) {
+      if (!inliers[i]) continue
+      this.pts[k * 2] = this.nextPts[i * 2]
+      this.pts[k * 2 + 1] = this.nextPts[i * 2 + 1]
+      k += 1
+    }
+    this.featCount = k
+  }
+
+  private reacquire(source: CanvasImageSource): void {
+    this.lostFrames += 1
+    if (this.detector) void this.pollFaces(source)
+    const predX = this.kf.x
+    const predY = this.kf.y
+    const grow = Math.min(
+      Math.max(this.curPyr.w, this.curPyr.h),
+      this.roiWork * 1.5 * (1 + this.lostFrames * 0.35),
     )
-
-    let guessX = color.x * scaleX
-    let guessY = color.y * scaleY
-    let via: TrackResult['via'] = 'color'
-    let score = color.score
-
-    if (this.coarse) {
-      const gray = rgbaToGray(pixels, this.work.width, this.work.height)
-      const coarseHit = searchWhole(gray, this.work.width, this.work.height, this.coarse)
-      const patchX = coarseHit.x * scaleX
-      const patchY = coarseHit.y * scaleY
-      const patchScore = clamp01(1 - coarseHit.cost / (COARSE_PATCH * COARSE_PATCH * 40))
-      const colorWeak = color.score < 0.28
-      const patchNear =
-        Math.hypot(patchX - guessX, patchY - guessY) < Math.max(srcW, srcH) * 0.2
-      if (colorWeak || patchNear) {
-        guessX = patchX
-        guessY = patchY
-        via = 'patch'
-        score = Math.max(score, patchScore)
-      }
-    }
-
-    const face = this.pickFace(guessX, guessY)
+    let hintX: number | undefined
+    let hintY: number | undefined
+    const face = this.nearFace(predX, predY)
     if (face) {
-      guessX = face.cx
-      guessY = face.cy
-      this.foundSize = face.size
-      via = 'face'
-      score = 1
+      hintX = face.cx / this.sx
+      hintY = face.cy / this.sy
     }
+    const hit = this.ncc.find(
+      this.curPyr.levels[0],
+      this.curPyr.levels[Math.min(2, this.curPyr.levels.length - 1)],
+      predX,
+      predY,
+      grow,
+      hintX,
+      hintY,
+    )
+    if (!hit || hit.ncc < NCC_ACCEPT) return
 
-    const win = FINE_PATCH + FINE_SEARCH * 2
-    if (this.fineT) {
-      blit(this.fineCtx, source, guessX, guessY, win)
-      const fineGray = readGray(this.fineCtx, win, win)
-      const fineHit = searchLocal(fineGray, win, this.fineT)
-      const origin = win / 2
-      guessX += fineHit.x - origin
-      guessY += fineHit.y - origin
-      const meanAbs = fineHit.cost / (FINE_PATCH * FINE_PATCH)
-      score = Math.max(score, clamp01(1 - meanAbs / 42))
-    }
-
-    const prevX = this.foundX
-    const prevY = this.foundY
-    this.foundX = clamp(guessX, 0, srcW)
-    this.foundY = clamp(guessY, 0, srcH)
-    this.vx = this.foundX - prevX
-    this.vy = this.foundY - prevY
-    this.score = score
-    if (score < 0.12) this.misses += 1
-    else this.misses = Math.max(0, this.misses - 2)
-    this.lost = this.misses >= MISS_LIMIT
-    return this.result(score >= 0.12, via)
+    this.kf.reset(hit.x, hit.y)
+    this.centerWorkX = hit.x
+    this.centerWorkY = hit.y
+    this.lost = false
+    this.misses = 0
+    this.lostFrames = 0
+    this.featCount = this.features.detect(
+      this.curPyr.levels[0],
+      { cx: hit.x, cy: hit.y, radius: this.roiWork },
+      this.pts,
+      MAX_FEATURES,
+    )
+    this.framesSinceRefresh = 0
   }
 
-  private result(visual: boolean, via: TrackResult['via']): TrackResult {
-    return {
-      foundX: this.foundX,
-      foundY: this.foundY,
-      foundSize: this.foundSize,
-      score: this.score,
-      lost: this.lost,
-      visual,
-      via,
-    }
-  }
-
-  private pickFace(nearX: number, nearY: number): FaceBox | null {
+  private nearFace(predX: number, predY: number): FaceBox | null {
     if (this.faces.length === 0) return null
+    const lim = this.roiWork * 2
     let best: FaceBox | null = null
-    let bestD = Math.max(this.srcW, this.srcH) * 0.18
+    let bestD = lim
     for (const face of this.faces) {
-      const d = Math.hypot(face.cx - nearX, face.cy - nearY)
+      const fx = face.cx / this.sx
+      const fy = face.cy / this.sy
+      const d = Math.hypot(fx - predX, fy - predY)
       if (d < bestD) {
         best = face
         bestD = d
@@ -230,14 +380,35 @@ export class SubjectTracker {
     this.detecting = false
   }
 
-  private downscale(source: CanvasImageSource, srcW: number, srcH: number): void {
-    const h = Math.max(90, Math.round((WORK_W * srcH) / srcW))
+  private grab(source: CanvasImageSource, srcW: number, srcH: number): void {
+    const h = Math.max(1, Math.round((WORK_W * srcH) / srcW))
     if (this.work.width !== WORK_W || this.work.height !== h) {
       this.work.width = WORK_W
       this.work.height = h
     }
+    this.sx = srcW / this.work.width
+    this.sy = srcH / this.work.height
     this.workCtx.setTransform(1, 0, 0, 1, 0, 0)
+    this.workCtx.imageSmoothingEnabled = true
     this.workCtx.drawImage(source, 0, 0, WORK_W, h)
+    const img = this.workCtx.getImageData(0, 0, WORK_W, h)
+    this.curPyr.build(img)
+  }
+
+  private result(visual: boolean, via: TrackVia): TrackResult {
+    return {
+      foundX: this.foundX,
+      foundY: this.foundY,
+      foundSize: this.foundSize,
+      score: this.score,
+      lost: this.lost,
+      visual,
+      via,
+      rotation: this.rotation,
+      scale: this.scale,
+      features: this.featCount,
+      lastMs: this.lastMs,
+    }
   }
 }
 
@@ -250,277 +421,4 @@ function createFaceDetector(): FaceDetectorLike | null {
   } catch {
     return null
   }
-}
-
-function colorHist(
-  data: Uint8ClampedArray,
-  w: number,
-  h: number,
-  cx: number,
-  cy: number,
-  radius: number,
-): Float32Array {
-  const hist = new Float32Array(H_BINS * S_BINS)
-  const r2 = radius * radius
-  let total = 0
-  const x0 = Math.max(0, Math.floor(cx - radius))
-  const x1 = Math.min(w - 1, Math.ceil(cx + radius))
-  const y0 = Math.max(0, Math.floor(cy - radius))
-  const y1 = Math.min(h - 1, Math.ceil(cy + radius))
-  for (let y = y0; y <= y1; y++) {
-    for (let x = x0; x <= x1; x++) {
-      const dx = x - cx
-      const dy = y - cy
-      if (dx * dx + dy * dy > r2) continue
-      const i = (y * w + x) * 4
-      const hs = rgbToHS(data[i], data[i + 1], data[i + 2])
-      if (hs.s < 0.12 || hs.v < 0.12) continue
-      const hb = Math.min(H_BINS - 1, Math.floor((hs.h / 180) * H_BINS))
-      const sb = Math.min(S_BINS - 1, Math.floor(hs.s * S_BINS))
-      hist[hb * S_BINS + sb] += 1
-      total += 1
-    }
-  }
-  if (total > 0) {
-    for (let i = 0; i < hist.length; i++) hist[i] /= total
-  }
-  return hist
-}
-
-function meanShift(
-  data: Uint8ClampedArray,
-  w: number,
-  h: number,
-  hist: Float32Array,
-  startX: number,
-  startY: number,
-): { x: number; y: number; score: number } {
-  const prob = new Float32Array(w * h)
-  let peak = 0
-  let px = startX
-  let py = startY
-  for (let y = 0; y < h; y++) {
-    for (let x = 0; x < w; x++) {
-      const i = (y * w + x) * 4
-      const hs = rgbToHS(data[i], data[i + 1], data[i + 2])
-      let p = 0
-      if (hs.s >= 0.12 && hs.v >= 0.12) {
-        const hb = Math.min(H_BINS - 1, Math.floor((hs.h / 180) * H_BINS))
-        const sb = Math.min(S_BINS - 1, Math.floor(hs.s * S_BINS))
-        p = hist[hb * S_BINS + sb]
-      }
-      prob[y * w + x] = p
-      if (p > peak) {
-        peak = p
-        px = x
-        py = y
-      }
-    }
-  }
-  let cx = clamp(startX, 0, w - 1)
-  let cy = clamp(startY, 0, h - 1)
-  if (peak > 0) {
-    cx = px
-    cy = py
-  }
-  const rad = Math.max(10, Math.round(Math.min(w, h) * 0.12))
-  for (let iter = 0; iter < 8; iter++) {
-    let sw = 0
-    let sx = 0
-    let sy = 0
-    const x0 = Math.max(0, Math.round(cx) - rad)
-    const x1 = Math.min(w - 1, Math.round(cx) + rad)
-    const y0 = Math.max(0, Math.round(cy) - rad)
-    const y1 = Math.min(h - 1, Math.round(cy) + rad)
-    for (let y = y0; y <= y1; y++) {
-      for (let x = x0; x <= x1; x++) {
-        const p = prob[y * w + x]
-        sw += p
-        sx += p * x
-        sy += p * y
-      }
-    }
-    if (sw < 1e-6) break
-    cx = sx / sw
-    cy = sy / sw
-  }
-  return { x: cx, y: cy, score: clamp01(peak * 8) }
-}
-
-function rgbToHS(r: number, g: number, b: number): { h: number; s: number; v: number } {
-  r /= 255
-  g /= 255
-  b /= 255
-  const max = Math.max(r, g, b)
-  const min = Math.min(r, g, b)
-  const v = max
-  const d = max - min
-  const s = max === 0 ? 0 : d / max
-  let h = 0
-  if (d !== 0) {
-    if (max === r) h = (g - b) / d + (g < b ? 6 : 0)
-    else if (max === g) h = (b - r) / d + 2
-    else h = (r - g) / d + 4
-    h *= 30
-  }
-  return { h, s, v }
-}
-
-function searchWhole(
-  gray: Uint8Array,
-  gw: number,
-  gh: number,
-  templ: Uint8Array,
-): { x: number; y: number; cost: number } {
-  const half = Math.floor(COARSE_PATCH / 2)
-  const minX = half
-  const maxX = gw - half - 1
-  const minY = half
-  const maxY = gh - half - 1
-  let best = Infinity
-  let bx = Math.floor(gw / 2)
-  let by = Math.floor(gh / 2)
-  for (let y = minY; y <= maxY; y += 2) {
-    for (let x = minX; x <= maxX; x += 2) {
-      const cost = sad(gray, gw, x, y, templ, COARSE_PATCH)
-      if (cost < best) {
-        best = cost
-        bx = x
-        by = y
-      }
-    }
-  }
-  for (let y = by - 1; y <= by + 1; y++) {
-    for (let x = bx - 1; x <= bx + 1; x++) {
-      if (x < minX || x > maxX || y < minY || y > maxY) continue
-      const cost = sad(gray, gw, x, y, templ, COARSE_PATCH)
-      if (cost < best) {
-        best = cost
-        bx = x
-        by = y
-      }
-    }
-  }
-  return { x: bx, y: by, cost: best }
-}
-
-function searchLocal(
-  gray: Uint8Array,
-  gw: number,
-  templ: Uint8Array,
-): { x: number; y: number; cost: number } {
-  const half = Math.floor(FINE_PATCH / 2)
-  const min = half
-  const max = gw - half - 1
-  let best = Infinity
-  let bx = Math.floor(gw / 2)
-  let by = bx
-  for (let y = min; y <= max; y += 2) {
-    for (let x = min; x <= max; x += 2) {
-      const cost = sad(gray, gw, x, y, templ, FINE_PATCH)
-      if (cost < best) {
-        best = cost
-        bx = x
-        by = y
-      }
-    }
-  }
-  for (let y = by - 1; y <= by + 1; y++) {
-    for (let x = bx - 1; x <= bx + 1; x++) {
-      if (x < min || x > max || y < min || y > max) continue
-      const cost = sad(gray, gw, x, y, templ, FINE_PATCH)
-      if (cost < best) {
-        best = cost
-        bx = x
-        by = y
-      }
-    }
-  }
-  return { x: bx, y: by, cost: best }
-}
-
-function extractPatch(
-  gray: Uint8Array,
-  gw: number,
-  cx: number,
-  cy: number,
-  size: number,
-): Uint8Array {
-  const out = new Uint8Array(size * size)
-  const half = Math.floor(size / 2)
-  let i = 0
-  for (let y = cy - half; y < cy - half + size; y++) {
-    const row = y * gw + (cx - half)
-    for (let x = 0; x < size; x++) out[i++] = gray[row + x] ?? 0
-  }
-  return out
-}
-
-function sad(
-  gray: Uint8Array,
-  gw: number,
-  cx: number,
-  cy: number,
-  templ: Uint8Array,
-  size: number,
-): number {
-  const half = Math.floor(size / 2)
-  let s = 0
-  let t = 0
-  for (let y = cy - half; y < cy - half + size; y++) {
-    let i = y * gw + (cx - half)
-    for (let x = 0; x < size; x++) s += Math.abs(gray[i++] - templ[t++])
-  }
-  return s
-}
-
-function blit(
-  ctx: CanvasRenderingContext2D,
-  source: CanvasImageSource,
-  cx: number,
-  cy: number,
-  size: number,
-): void {
-  if (ctx.canvas.width !== size || ctx.canvas.height !== size) {
-    ctx.canvas.width = size
-    ctx.canvas.height = size
-  }
-  ctx.setTransform(1, 0, 0, 1, 0, 0)
-  ctx.fillStyle = '#000'
-  ctx.fillRect(0, 0, size, size)
-  ctx.drawImage(
-    source,
-    Math.round(cx - size / 2),
-    Math.round(cy - size / 2),
-    size,
-    size,
-    0,
-    0,
-    size,
-    size,
-  )
-}
-
-function readGray(ctx: CanvasRenderingContext2D, w: number, h: number): Uint8Array {
-  return rgbaToGray(ctx.getImageData(0, 0, w, h).data, w, h)
-}
-
-function rgbaToGray(data: Uint8ClampedArray, w: number, h: number): Uint8Array {
-  const gray = new Uint8Array(w * h)
-  for (let i = 0, p = 0; i < gray.length; i++, p += 4) {
-    gray[i] = (data[p] * 77 + data[p + 1] * 150 + data[p + 2] * 29) >> 8
-  }
-  return gray
-}
-
-function clamp(v: number, lo: number, hi: number): number {
-  return Math.min(hi, Math.max(lo, v))
-}
-
-function clampInt(v: number, lo: number, hi: number): number {
-  return Math.min(hi, Math.max(lo, v | 0))
-}
-
-function clamp01(v: number): number {
-  return Math.min(1, Math.max(0, v))
 }
