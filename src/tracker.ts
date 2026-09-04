@@ -9,7 +9,7 @@ import { KalmanCV, measurementR, ScaleSmoother } from './vision/kalman.ts'
 import { KltTracker } from './vision/klt.ts'
 import { NccMatcher, NCC_ACCEPT } from './vision/ncc.ts'
 import { Pyramid } from './vision/pyramid.ts'
-import { applySimilarity, SimilarityRansac } from './vision/ransac.ts'
+import { applySimilarity, SimilarityRansac, type Similarity } from './vision/ransac.ts'
 
 export const WORK_W = 480
 const MISS_LIMIT = 12
@@ -75,8 +75,18 @@ export class SubjectTracker {
   private readonly guesses = new Float32Array(MAX_FEATURES * 2)
   private readonly nextPts = new Float32Array(MAX_FEATURES * 2)
   private readonly status = new Uint8Array(MAX_FEATURES)
+  private readonly restStatus = new Uint8Array(MAX_FEATURES)
+  private readonly firstInliers = new Uint8Array(MAX_FEATURES)
   private readonly err = new Float32Array(MAX_FEATURES)
   private featCount = 0
+
+  /**
+   * IMU → image gain, learned online. Sign and magnitude depend on camera
+   * facing, device orientation and FOV, so a hard-coded mapping is wrong for
+   * one of front/rear. 1 = trust the nominal mapping until data says otherwise.
+   */
+  private imuGainX = 1
+  private imuGainY = 1
 
   private sx = 1
   private sy = 1
@@ -187,10 +197,12 @@ export class SubjectTracker {
     let dCx = this.kf.x - prevCx
     let dCy = this.kf.y - prevCy
     if (this.misses > 0) {
-      dCx += priorW.x
-      dCy += priorW.y
-      this.kf.x += priorW.x
-      this.kf.y += priorW.y
+      const px = priorW.x * this.imuGainX
+      const py = priorW.y * this.imuGainY
+      dCx += px
+      dCy += py
+      this.kf.x += px
+      this.kf.y += py
     }
 
     let via: TrackVia = 'pred'
@@ -218,17 +230,13 @@ export class SubjectTracker {
         this.status,
         this.err,
       )
-      this.dropStaticTracks(n, dCx, dCy)
-      const sim = this.ransac.estimate(this.pts, this.nextPts, this.status, n)
+      const sim = this.pickSubjectCluster(n, prevCx, prevCy)
       if (!sim || sim.inlierCount < MIN_ACCEPT_INLIERS) {
         this.miss()
         this.keepTrackedFeatures(n)
       } else {
         const meas = this.mapCenter(n, sim.inliers, prevCx, prevCy, sim)
-        const jumpPred = Math.hypot(dCx, dCy)
-        const jumpMeas = Math.hypot(meas.x - prevCx, meas.y - prevCy)
-        const backgroundMotion = jumpPred > 4 && jumpMeas < jumpPred * 0.4
-        if (backgroundMotion || this.inlierCentroidFar(n, sim.inliers)) {
+        if (this.inlierCentroidFar(n, sim.inliers)) {
           this.miss()
           this.keepTrackedFeatures(n)
         } else {
@@ -241,6 +249,7 @@ export class SubjectTracker {
             this.misses = 0
             this.lost = false
             this.lostFrames = 0
+            this.learnImuGain(priorW, meas.x - prevCx, meas.y - prevCy)
             if (Math.abs(sim.theta) > 0.008) this.rotation += sim.theta
             else this.rotation *= 0.98
             if (Math.abs(sim.s - 1) > 0.015) {
@@ -342,29 +351,58 @@ export class SubjectTracker {
     }
   }
 
-  /** Drop motionless tracks when a moving cluster is large enough to fit. */
-  private dropStaticTracks(n: number, dCx: number, dCy: number): void {
-    const expected = Math.hypot(dCx, dCy)
-    const thresh = Math.max(2.5, expected * 0.35)
-    let moving = 0
-    let still = 0
+  /**
+   * Subject vs background is a spatial question, not a motion one. With a
+   * static camera the subject moves and the background does not; with a
+   * hand-held rear camera following the subject it is the other way round.
+   * So: fit the dominant cluster, then fit the leftovers, and keep whichever
+   * cluster sat closer to the pin in the previous frame.
+   */
+  private pickSubjectCluster(n: number, cx: number, cy: number): Similarity | null {
+    const first = this.ransac.estimate(this.pts, this.nextPts, this.status, n)
+    if (!first) return null
+    let tracked = 0
+    for (let i = 0; i < n; i++) if (this.status[i]) tracked += 1
+    if (first.inlierCount >= tracked * 0.7) return first
+
+    // RANSAC reuses its inlier buffer; copy before the second fit.
+    this.firstInliers.set(first.inliers)
+    const firstCopy: Similarity = { ...first, inliers: this.firstInliers.subarray(0, n) }
     for (let i = 0; i < n; i++) {
-      if (!this.status[i]) continue
-      const f = Math.hypot(
-        this.nextPts[i * 2] - this.pts[i * 2],
-        this.nextPts[i * 2 + 1] - this.pts[i * 2 + 1],
-      )
-      if (f < thresh) still += 1
-      else moving += 1
+      this.restStatus[i] = this.status[i] && !this.firstInliers[i] ? 1 : 0
     }
-    if (moving < MIN_ACCEPT_INLIERS || still < 4) return
+    const second = this.ransac.estimate(this.pts, this.nextPts, this.restStatus, n)
+    if (!second || second.inlierCount < MIN_ACCEPT_INLIERS) return firstCopy
+
+    const d1 = this.prevCentroidDist(n, firstCopy.inliers, cx, cy)
+    const d2 = this.prevCentroidDist(n, second.inliers, cx, cy)
+    return d2 < d1 * 0.8 ? second : firstCopy
+  }
+
+  private prevCentroidDist(n: number, inliers: Uint8Array, cx: number, cy: number): number {
+    let sx = 0
+    let sy = 0
+    let c = 0
     for (let i = 0; i < n; i++) {
-      if (!this.status[i]) continue
-      const f = Math.hypot(
-        this.nextPts[i * 2] - this.pts[i * 2],
-        this.nextPts[i * 2 + 1] - this.pts[i * 2 + 1],
-      )
-      if (f < thresh) this.status[i] = 0
+      if (!inliers[i]) continue
+      sx += this.pts[i * 2]
+      sy += this.pts[i * 2 + 1]
+      c += 1
+    }
+    if (c === 0) return Infinity
+    return Math.hypot(sx / c - cx, sy / c - cy)
+  }
+
+  /** Per-axis least-squares gain between the IMU image shift and observed flow. */
+  private learnImuGain(prior: { x: number; y: number }, dx: number, dy: number): void {
+    const rate = 0.08
+    if (Math.abs(prior.x) > 0.75) {
+      const g = clamp(dx / prior.x, -1.5, 1.5)
+      this.imuGainX += rate * (g - this.imuGainX)
+    }
+    if (Math.abs(prior.y) > 0.75) {
+      const g = clamp(dy / prior.y, -1.5, 1.5)
+      this.imuGainY += rate * (g - this.imuGainY)
     }
   }
 

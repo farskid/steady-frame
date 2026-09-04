@@ -50,6 +50,7 @@ app.innerHTML = `
       <button type="button" class="primary" id="lock-btn">Lock</button>
       <button type="button" id="shake-btn" hidden>Shake camera</button>
       <button type="button" id="nudge-btn" hidden>Whip subject</button>
+      <button type="button" id="pan-btn" hidden>Pan follow</button>
       <button type="button" id="flip-btn" hidden>Flip camera</button>
     </div>
     <p class="status" id="status"></p>
@@ -71,6 +72,7 @@ const stepsEl = app.querySelector<HTMLElement>('#steps')!
 const lockBtn = app.querySelector<HTMLButtonElement>('#lock-btn')!
 const shakeBtn = app.querySelector<HTMLButtonElement>('#shake-btn')!
 const nudgeBtn = app.querySelector<HTMLButtonElement>('#nudge-btn')!
+const panBtn = app.querySelector<HTMLButtonElement>('#pan-btn')!
 const flipBtn = app.querySelector<HTMLButtonElement>('#flip-btn')!
 
 const camera = new CameraFeed()
@@ -86,6 +88,7 @@ let locked = false
 let demoShakeUntil = 0
 let subjectMoveStart = 0
 let subjectMoveEnd = 0
+let panFollow = false
 let pointerActive = false
 let pointerGyro = { x: 0, y: 0, z: 0 }
 let lastFrame = performance.now() / 1000
@@ -178,8 +181,14 @@ function paintSource(time: number): void {
     sourceCtx.setTransform(1, 0, 0, 1, 0, 0)
     return
   }
+  const subject = subjectOffset(time)
   sceneCameraMatrix(motion.state, width, height).applyTo(sourceCtx)
-  drawTestScene(sourceCtx, width, height, time, subjectOffset(time))
+  if (panFollow && subjectMoveStart > 0) {
+    // Hand-held rear camera following the subject: the subject stays near
+    // frame center while the whole background flows. Slight lag keeps it real.
+    sourceCtx.translate(-subject.x * 0.85, -subject.y * 0.85)
+  }
+  drawTestScene(sourceCtx, width, height, time, subject)
   sourceCtx.setTransform(1, 0, 0, 1, 0, 0)
 }
 
@@ -240,6 +249,7 @@ function refreshChrome(): void {
   lockBtn.classList.toggle('danger', locked)
   shakeBtn.hidden = !locked
   nudgeBtn.hidden = !locked || camera.ready
+  panBtn.hidden = !locked || camera.ready
   flipBtn.hidden = camera.status !== 'live'
   pipWrap.hidden = !locked
   setStep(locked ? 3 : 2)
@@ -412,13 +422,17 @@ shakeBtn.addEventListener('click', () => {
   demoShakeUntil = performance.now() + 3200
 })
 
-nudgeBtn.addEventListener('click', () => {
+function startWhip(follow: boolean): void {
   const now = performance.now() / 1000
   // Restarting mid-whip (or mid-fade) would teleport the target; ignore.
   if (subjectMoveStart > 0 && now < subjectMoveEnd + 0.5) return
+  panFollow = follow
   subjectMoveStart = now
   subjectMoveEnd = now + 4
-})
+}
+
+nudgeBtn.addEventListener('click', () => startWhip(false))
+panBtn.addEventListener('click', () => startWhip(true))
 
 flipBtn.addEventListener('click', () => {
   void camera.flip().then(() => {
