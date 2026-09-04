@@ -361,12 +361,16 @@ export class SubjectTracker {
 
   private reacquire(source: CanvasImageSource): void {
     this.lostFrames += 1
+    if (this.lostFrames >= 10) {
+      this.kf.vx = 0
+      this.kf.vy = 0
+    }
     if (this.detector) void this.pollFaces(source)
     const predX = this.kf.x
     const predY = this.kf.y
     const grow = Math.min(
       Math.max(this.curPyr.w, this.curPyr.h),
-      this.roiWork * 1.5 * (1 + this.lostFrames * 0.35),
+      this.roiWork * 2 * (1 + this.lostFrames * 0.6),
     )
     let hintX: number | undefined
     let hintY: number | undefined

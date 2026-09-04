@@ -3,7 +3,7 @@
 import { sampleBuf, type Level } from './pyramid.ts'
 
 export const TEMPLATE = 48
-export const NCC_ACCEPT = 0.6
+export const NCC_ACCEPT = 0.5
 const COARSE = TEMPLATE >> 2
 const HALF = TEMPLATE >> 1
 const HALF_C = COARSE >> 1
