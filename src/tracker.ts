@@ -217,7 +217,10 @@ export class SubjectTracker {
         this.miss()
         this.keepTrackedFeatures(n, dCx, dCy)
       } else {
-        const meas = applySimilarity(sim, prevCx, prevCy)
+        const shift = this.inlierShift(n, sim.inliers)
+        const meas = shift
+          ? { x: prevCx + shift.x, y: prevCy + shift.y }
+          : applySimilarity(sim, prevCx, prevCy)
         const jumpPred = Math.hypot(dCx, dCy)
         const jumpMeas = Math.hypot(meas.x - prevCx, meas.y - prevCy)
         const backgroundMotion = jumpPred > 4 && jumpMeas < jumpPred * 0.4
@@ -226,7 +229,7 @@ export class SubjectTracker {
           this.keepTrackedFeatures(n, dCx, dCy)
         } else {
           const r = measurementR(sim.rms, sim.inlierCount)
-          const accepted = this.kf.update(meas.x, meas.y, r)
+          const accepted = this.kf.update(meas.x, meas.y, r, sim.inlierCount >= 16)
           if (!accepted) {
             this.miss()
             this.keepTrackedFeatures(n, dCx, dCy)
@@ -235,7 +238,7 @@ export class SubjectTracker {
             this.lost = false
             this.lostFrames = 0
             this.rotation += sim.theta
-            this.rawScale *= sim.s
+            if (Math.abs(sim.s - 1) > 0.015) this.rawScale *= sim.s
             this.rawScale = clamp(this.rawScale, 0.5, 2)
             this.scale = this.scaleSm.observe(this.rawScale)
             this.roiWork = clamp(this.roiWork * sim.s, this.lockRoiWork * 0.5, this.lockRoiWork * 2)
@@ -365,6 +368,26 @@ export class SubjectTracker {
     }
     if (k >= MIN_LOCK) this.featCount = k
     else this.coastFeatures(n, dCx, dCy)
+  }
+
+  /** Translation of the inlier cloud — ignores a noisy RANSAC θ about the origin. */
+  private inlierShift(n: number, inliers: Uint8Array): { x: number; y: number } | null {
+    let psx = 0
+    let psy = 0
+    let nsx = 0
+    let nsy = 0
+    let c = 0
+    for (let i = 0; i < n; i++) {
+      if (!inliers[i]) continue
+      psx += this.pts[i * 2]
+      psy += this.pts[i * 2 + 1]
+      nsx += this.nextPts[i * 2]
+      nsy += this.nextPts[i * 2 + 1]
+      c += 1
+    }
+    if (c < 4) return null
+    const inv = 1 / c
+    return { x: (nsx - psx) * inv, y: (nsy - psy) * inv }
   }
 
   private inlierCentroidFar(n: number, inliers: Uint8Array): boolean {
