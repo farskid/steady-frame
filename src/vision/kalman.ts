@@ -1,8 +1,11 @@
 /** Constant-velocity Kalman filter on [x, y, vx, vy] plus a 1D scale smoother. */
 
 const CHI2_95_DF2 = 9.21
+const CHI2_RELAX_DF2 = 25
 const SCALE_ALPHA = 0.4
 const Q_JERK = 2400
+/** Extra position noise so a whipping target is not a Mahalanobis outlier. */
+const Q_POS = 80
 
 export class KalmanCV {
   x = 0
@@ -63,12 +66,12 @@ export class KalmanCV {
     const dt4 = dt2 * dt2
     // Q for white acceleration spectral density q (px²/s³):
     // pos-pos dt^4/4, pos-vel dt^3/2, vel-vel dt^2
-    out[0] += q * dt4 * 0.25
+    out[0] += q * dt4 * 0.25 + Q_POS
     out[1] += 0
     out[2] += q * dt3 * 0.5
     out[3] += 0
     out[4] += 0
-    out[5] += q * dt4 * 0.25
+    out[5] += q * dt4 * 0.25 + Q_POS
     out[6] += 0
     out[7] += q * dt3 * 0.5
     out[8] += q * dt3 * 0.5
@@ -88,7 +91,7 @@ export class KalmanCV {
    * Position update. Returns false if the innovation is a Mahalanobis outlier
    * (d² > 9.21); caller should treat that as a miss.
    */
-  update(zx: number, zy: number, r: number): boolean {
+  update(zx: number, zy: number, r: number, relax = false): boolean {
     const P = this.P
     const innX = zx - this.x
     const innY = zy - this.y
@@ -107,7 +110,8 @@ export class KalmanCV {
     const i10 = -s10 * invDet
     const i11 = s00 * invDet
     const d2 = innX * (i00 * innX + i01 * innY) + innY * (i10 * innX + i11 * innY)
-    if (d2 > CHI2_95_DF2) {
+    const gate = relax ? CHI2_RELAX_DF2 : CHI2_95_DF2
+    if (d2 > gate) {
       this.misses += 1
       return false
     }
